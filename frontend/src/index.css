@@ -1,0 +1,135 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
+
+  /* Brand & Accent */
+  --color-primary: #0F766E;
+  --color-primary-dark: #0B4F4A;
+  --color-primary-light: #14857C;
+  --color-primary-tint: #E6F4F2;
+  --color-primary-tint-soft: #F0F7F6;
+  --color-primary-subtext: #B7E3DE;
+
+  --color-accent: #FBBF24;
+  --color-accent-dark: #F59E0B;
+
+  /* Text */
+  --color-text-main: #0F172A;
+  --color-text-muted: #5B6678;
+  --color-text-label: #475569;
+
+  /* Surfaces & Borders */
+  --color-bg-app: #F5F6F8;
+  --color-surface: #FFFFFF;
+  --color-border-input: #E2E6EB;
+
+  /* Semantic Status */
+  --color-success-bg: #DDF3E4;
+  --color-success-text: #14532D;
+  --color-danger: #B91C1C;
+
+  /* Radius */
+  --radius-btn: 14px;
+  --radius-input: 12px;
+  --radius-card: 16px;
+  --radius-sheet: 28px;
+  --radius-chip: 99px;
+}
+
+:root {
+  --screen-width: 390px;
+}
+
+@layer base {
+  html,
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--color-bg-app);
+    color: var(--color-text-main);
+    font-size: 13px;
+    line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    margin: 0;
+    padding: 0;
+  }
+
+  h1 {
+    font-size: 22px;
+    font-weight: 800;
+    line-height: 1.25;
+    letter-spacing: -0.02em;
+    color: var(--color-text-main);
+  }
+}
+
+@layer components {
+  .pwa-shell {
+    width: 100%;
+    max-width: var(--screen-width);
+    min-height: 100dvh;
+    margin-left: auto;
+    margin-right: auto;
+    position: relative;
+  }
+
+  .btn-primary {
+    width: 100%;
+    height: 46px;
+    border-radius: var(--radius-btn);
+    background-color: var(--color-primary);
+    color: #FFFFFF;
+    font-size: 14px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    cursor: pointer;
+    transition: background-color 0.15s ease, opacity 0.15s ease;
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    background-color: var(--color-primary-dark);
+  }
+
+  .btn-primary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .input-label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-label);
+    margin-bottom: 6px;
+  }
+
+  .input-field {
+    width: 100%;
+    height: 46px;
+    background-color: var(--color-surface);
+    color: var(--color-text-main);
+    border: none;
+    border-radius: var(--radius-input);
+    box-shadow: inset 0 0 0 1.5px var(--color-border-input);
+    padding: 0 14px;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-weight: 500;
+    outline: none;
+    transition: box-shadow 0.15s ease;
+  }
+
+  .input-field::placeholder {
+    color: var(--color-text-muted);
+    font-weight: 400;
+  }
+
+  .input-field:focus {
+    box-shadow: inset 0 0 0 1.5px var(--color-primary);
+  }
+}
+
