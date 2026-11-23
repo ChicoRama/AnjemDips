@@ -1,4 +1,5 @@
 import supabase from '../config/supabase.js';
+import { checkDriverEligibility } from '../utils/driverEligibility.js';
 
 const OFFER_SELECT_QUERY = `
   *,
@@ -10,6 +11,24 @@ const ORDER_SELECT_QUERY = `
   customer:users!customer_id(id, nama, nim, no_wa),
   driver:users!driver_id(id, nama, nim, no_wa, jenis_kendaraan, plat_nomor, kapasitas_penumpang, is_online)
 `;
+
+const MIN_PRICE = 2000;
+const MAX_PRICE = 1000000;
+const MAX_PENUMPANG = 8;
+const MAX_NOTE_LENGTH = 200;
+
+const ORDER_FOR_OFFER_FIELDS =
+  'id, customer_id, status, jenis_layanan, jenis_kendaraan, jumlah_penumpang';
+
+// Kontak driver baru terlihat setelah tawaran disepakati
+// (sama seperti kontak pemesan yang disembunyikan dari driver sebelum order diterima)
+const sanitizeOffer = (offer) => {
+  if (!offer || !offer.driver || offer.status === 'accepted') return offer;
+  return {
+    ...offer,
+    driver: { ...offer.driver, nim: null, no_wa: null },
+  };
+};
 
 // GET /api/orders/:id/offers
 export const getOrderOffers = async (req, res) => {
@@ -57,7 +76,7 @@ export const getOrderOffers = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      data: data || [],
+      data: (data || []).map(sanitizeOffer),
     });
   } catch (error) {
     return res.status(500).json({
@@ -75,16 +94,28 @@ export const createOrderOffer = async (req, res) => {
     const { offered_price, driver_id, adjusted_passengers, note } = req.body;
 
     const parsedPrice = Number(offered_price);
-    if (!parsedPrice || parsedPrice < 2000) {
+    if (
+      !Number.isInteger(parsedPrice) ||
+      parsedPrice < MIN_PRICE ||
+      parsedPrice > MAX_PRICE
+    ) {
       return res.status(400).json({
         success: false,
-        message: 'Nominal tawaran minimal Rp 2.000.',
+        message: `Nominal tawaran harus berupa angka bulat antara Rp ${MIN_PRICE.toLocaleString('id-ID')} dan Rp ${MAX_PRICE.toLocaleString('id-ID')}.`,
+      });
+    }
+
+    const cleanNote = note ? String(note).trim() : '';
+    if (cleanNote.length > MAX_NOTE_LENGTH) {
+      return res.status(400).json({
+        success: false,
+        message: `Catatan maksimal ${MAX_NOTE_LENGTH} karakter.`,
       });
     }
 
     const { data: order, error: orderError } = await supabase
       .from('orders')
-      .select('id, customer_id, status, jumlah_penumpang')
+      .select(ORDER_FOR_OFFER_FIELDS)
       .eq('id', id)
       .maybeSingle();
 
@@ -104,11 +135,48 @@ export const createOrderOffer = async (req, res) => {
       });
     }
 
+    const isDriver = req.user.role === 'driver';
+    const offeredBy = isDriver ? 'driver' : 'customer';
     let targetDriverId = null;
-    let offeredBy = req.user.role === 'driver' ? 'driver' : 'customer';
+    let cleanPassengers = null;
 
-    if (req.user.role === 'driver') {
+    // Penyesuaian jumlah penumpang hanya boleh dari pemesan, dan hanya untuk AnJem
+    if (
+      !isDriver &&
+      order.jenis_layanan === 'anjem' &&
+      adjusted_passengers !== undefined &&
+      adjusted_passengers !== null &&
+      adjusted_passengers !== ''
+    ) {
+      const parsedPax = Number(adjusted_passengers);
+      if (
+        !Number.isInteger(parsedPax) ||
+        parsedPax < 1 ||
+        parsedPax > MAX_PENUMPANG
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: `Jumlah penumpang harus antara 1 hingga ${MAX_PENUMPANG} orang.`,
+        });
+      }
+      cleanPassengers = parsedPax;
+    }
+
+    if (isDriver) {
       targetDriverId = req.user.id;
+
+      // Driver wajib ON, punya data kendaraan, dan kendaraannya cocok.
+      // Kapasitas & trip aktif baru dicek saat tawaran disepakati.
+      const eligibility = await checkDriverEligibility(targetDriverId, order, {
+        skipCapacity: true,
+        skipActiveTrip: true,
+      });
+      if (!eligibility.ok) {
+        return res.status(eligibility.status).json({
+          success: false,
+          message: eligibility.message,
+        });
+      }
     } else {
       if (order.customer_id !== req.user.id) {
         return res.status(403).json({
@@ -116,46 +184,43 @@ export const createOrderOffer = async (req, res) => {
           message: 'Anda bukan pembuat pesanan ini.',
         });
       }
+
       targetDriverId = driver_id;
-      if (!targetDriverId) {
+      if (!targetDriverId || typeof targetDriverId !== 'string') {
         return res.status(400).json({
           success: false,
           message: 'driver_id wajib disertakan saat pemesan menawar balik.',
         });
       }
 
-      // Pastikan driver tujuan benar-benar ada dan berperan sebagai driver
-      const { data: targetDriver, error: targetDriverError } = await supabase
-        .from('users')
+      // Pemesan hanya boleh menawar balik ke driver yang sudah menawar lebih dulu
+      const { data: driverOffer, error: driverOfferError } = await supabase
+        .from('offers')
         .select('id')
-        .eq('id', targetDriverId)
-        .eq('role', 'driver')
-        .maybeSingle();
+        .eq('order_id', id)
+        .eq('driver_id', targetDriverId)
+        .eq('offered_by', 'driver')
+        .limit(1);
 
-      if (targetDriverError) throw targetDriverError;
+      if (driverOfferError) throw driverOfferError;
 
-      if (!targetDriver) {
-        return res.status(404).json({
-          success: false,
-          message: 'Driver tujuan tidak ditemukan.',
-        });
-      }
-    }
-
-    let cleanPassengers = null;
-    if (
-      adjusted_passengers !== undefined &&
-      adjusted_passengers !== null &&
-      adjusted_passengers !== ''
-    ) {
-      const parsedPax = Number(adjusted_passengers);
-      if (!Number.isInteger(parsedPax) || parsedPax < 1) {
+      if (!driverOffer || driverOffer.length === 0) {
         return res.status(400).json({
           success: false,
-          message: 'Jumlah penumpang tidak valid.',
+          message: 'Driver ini belum mengirim tawaran untuk pesananmu.',
         });
       }
-      cleanPassengers = parsedPax;
+
+      const eligibility = await checkDriverEligibility(targetDriverId, order, {
+        passengers: cleanPassengers ?? order.jumlah_penumpang,
+        skipActiveTrip: true,
+      });
+      if (!eligibility.ok) {
+        return res.status(eligibility.status).json({
+          success: false,
+          message: eligibility.message,
+        });
+      }
     }
 
     const { data: createdOffer, error: insertError } = await supabase
@@ -167,7 +232,7 @@ export const createOrderOffer = async (req, res) => {
           offered_by: offeredBy,
           offered_price: parsedPrice,
           adjusted_passengers: cleanPassengers,
-          note: note ? String(note).trim() : null,
+          note: cleanNote || null,
           status: 'pending',
         },
       ])
@@ -188,22 +253,13 @@ export const createOrderOffer = async (req, res) => {
       .eq('status', 'pending')
       .neq('id', createdOffer.id);
 
-    // Jika pemesan menawar balik sekaligus menyesuaikan penumpang, perbarui juga order
-    if (offeredBy === 'customer') {
-      const orderPatch = {
-        ongkir: parsedPrice,
-        updated_at: new Date().toISOString(),
-      };
-      if (cleanPassengers !== null) {
-        orderPatch.jumlah_penumpang = cleanPassengers;
-      }
-      await supabase.from('orders').update(orderPatch).eq('id', id);
-    }
+    // Catatan: tabel orders TIDAK diubah saat tawar-menawar.
+    // Harga & jumlah penumpang final baru diterapkan ketika tawaran disepakati (accept).
 
     return res.status(201).json({
       success: true,
       message: 'Penawaran harga berhasil dikirim.',
-      data: createdOffer,
+      data: sanitizeOffer(createdOffer),
     });
   } catch (error) {
     return res.status(500).json({
@@ -221,7 +277,7 @@ export const acceptOrderOffer = async (req, res) => {
 
     const { data: order, error: orderError } = await supabase
       .from('orders')
-      .select('id, customer_id, status, jumlah_penumpang')
+      .select(ORDER_FOR_OFFER_FIELDS)
       .eq('id', id)
       .maybeSingle();
 
@@ -279,6 +335,25 @@ export const acceptOrderOffer = async (req, res) => {
       });
     }
 
+    const finalPassengers =
+      order.jenis_layanan === 'anjem'
+        ? offer.adjusted_passengers || order.jumlah_penumpang
+        : order.jumlah_penumpang;
+
+    // Driver harus masih memenuhi syarat: ON, kendaraan cocok & muat, tidak ada trip aktif
+    const eligibility = await checkDriverEligibility(offer.driver_id, order, {
+      passengers: finalPassengers,
+    });
+    if (!eligibility.ok) {
+      const isDriverSelf = req.user.id === offer.driver_id;
+      return res.status(eligibility.status).json({
+        success: false,
+        message: isDriverSelf
+          ? eligibility.message
+          : 'Driver ini sedang tidak dapat menerima order (offline, kendaraan tidak sesuai, atau sedang menjalankan trip lain). Coba tawaran lain.',
+      });
+    }
+
     const now = new Date().toISOString();
 
     // 1) Kunci order lebih dulu dengan update bersyarat (hanya jika masih pending).
@@ -288,8 +363,7 @@ export const acceptOrderOffer = async (req, res) => {
       .update({
         driver_id: offer.driver_id,
         ongkir: offer.offered_price,
-        jumlah_penumpang:
-          offer.adjusted_passengers || order.jumlah_penumpang,
+        jumlah_penumpang: finalPassengers,
         status: 'accepted',
         updated_at: now,
       })
@@ -339,3 +413,95 @@ export const acceptOrderOffer = async (req, res) => {
   }
 };
 
+// PATCH /api/orders/:id/offers/:offerId/reject
+export const rejectOrderOffer = async (req, res) => {
+  try {
+    const { id, offerId } = req.params;
+
+    const { data: order, error: orderError } = await supabase
+      .from('orders')
+      .select('id, customer_id, status')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (orderError) throw orderError;
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Pesanan tidak ditemukan.',
+      });
+    }
+
+    if (order.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'Pesanan ini sudah diproses atau tidak lagi tersedia.',
+      });
+    }
+
+    const { data: offer, error: offerError } = await supabase
+      .from('offers')
+      .select('id, order_id, driver_id, offered_by, status')
+      .eq('id', offerId)
+      .eq('order_id', id)
+      .maybeSingle();
+
+    if (offerError) throw offerError;
+
+    if (!offer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tawaran tidak ditemukan.',
+      });
+    }
+
+    if (offer.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'Tawaran ini sudah tidak berlaku (sudah diproses atau digantikan).',
+      });
+    }
+
+    // Yang boleh menolak adalah lawan dari pembuat tawaran
+    const isAllowed =
+      (offer.offered_by === 'driver' && order.customer_id === req.user.id) ||
+      (offer.offered_by === 'customer' && offer.driver_id === req.user.id);
+
+    if (!isAllowed) {
+      return res.status(403).json({
+        success: false,
+        message: 'Anda tidak berhak menolak tawaran ini.',
+      });
+    }
+
+    const { data: rejected, error: rejectError } = await supabase
+      .from('offers')
+      .update({ status: 'rejected', updated_at: new Date().toISOString() })
+      .eq('id', offerId)
+      .eq('status', 'pending')
+      .select(OFFER_SELECT_QUERY)
+      .maybeSingle();
+
+    if (rejectError) throw rejectError;
+
+    if (!rejected) {
+      return res.status(409).json({
+        success: false,
+        message: 'Tawaran ini baru saja berubah. Muat ulang lalu coba lagi.',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Tawaran ditolak.',
+      data: sanitizeOffer(rejected),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal menolak tawaran.',
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
+    });
+  }
+};

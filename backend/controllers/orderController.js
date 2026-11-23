@@ -9,6 +9,8 @@ const ORDER_SELECT_QUERY = `
 
 const MAX_ACTIVE_ORDERS_PER_CUSTOMER = 3;
 const PENDING_EXPIRE_MINUTES = 30;
+const JADWAL_EXPIRE_MINUTES = 30;
+const MAX_PENUMPANG = 8;
 const MIN_ONGKIR = 2000;
 const MAX_ONGKIR = 1000000;
 const ACTIVE_STATUSES = ['pending', 'accepted', 'on_progress'];
@@ -120,10 +122,10 @@ export const createOrder = async (req, res) => {
         });
       }
 
-      if (cleanJumlahPenumpang > 10) {
+      if (cleanJumlahPenumpang > MAX_PENUMPANG) {
         return res.status(400).json({
           success: false,
-          message: 'Jumlah penumpang maksimal 10 orang.',
+          message: `Jumlah penumpang maksimal ${MAX_PENUMPANG} orang.`,
         });
       }
     }
@@ -257,6 +259,17 @@ export const getOrders = async (req, res) => {
         .eq('status', 'pending')
         .lt('created_at', cutoff)
         .or('waktu_berangkat.is.null,waktu_berangkat.neq.jadwal');
+
+      // Order "Jadwal" kedaluwarsa bila waktunya sudah lewat > 30 menit dan belum diambil
+      const jadwalCutoff = new Date(
+        Date.now() - JADWAL_EXPIRE_MINUTES * 60 * 1000
+      ).toISOString();
+      await supabase
+        .from('orders')
+        .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+        .eq('status', 'pending')
+        .eq('waktu_berangkat', 'jadwal')
+        .lt('jadwal_at', jadwalCutoff);
     } catch {
       // Kegagalan housekeeping tidak boleh menggagalkan daftar order
     }

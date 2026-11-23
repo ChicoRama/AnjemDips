@@ -7,6 +7,7 @@ import Chip from '../../components/Chip';
 import Button from '../../components/Button';
 import BottomNav from '../../components/BottomNav';
 import { getDriverVehicleProfile } from '../../mocks/driverMocks';
+import { formatRibuan, waktuLabel } from '../../utils/format';
 
 const ACTIVE_TRIP_STATUSES = [
   'accepted',
@@ -14,11 +15,6 @@ const ACTIVE_TRIP_STATUSES = [
   'on_the_way',
   'in_progress',
 ];
-
-function formatRibuan(value) {
-  const num = Number(value) || 0;
-  return num.toLocaleString('id-ID');
-}
 
 function isSameDay(isoDate) {
   if (!isoDate) return false;
@@ -39,6 +35,7 @@ export default function DriverBeranda() {
   const [togglingStatus, setTogglingStatus] = useState(false);
 
   const [pendingOrders, setPendingOrders] = useState([]);
+  const [offerMap, setOfferMap] = useState({}); // orderId -> tawaran terbaru driver ini
   const [activeTrip, setActiveTrip] = useState(null);
   const [todayStats, setTodayStats] = useState({ count: 0, earnings: 0 });
   const [loadingOrders, setLoadingOrders] = useState(true);
@@ -46,7 +43,12 @@ export default function DriverBeranda() {
   const [error, setError] = useState('');
 
   const vehicle = getDriverVehicleProfile(user);
-  const vehicleLabel = vehicle.jenis_kendaraan === 'mobil' ? 'Mobil' : 'Motor';
+  const vehicleLabel =
+    vehicle.jenis_kendaraan === 'mobil'
+      ? 'Mobil'
+      : vehicle.jenis_kendaraan === 'motor'
+      ? 'Motor'
+      : 'Kendaraan';
   const platLabel = vehicle.plat_nomor || 'plat belum diisi';
 
   const fetchOrders = useCallback(async () => {
@@ -73,7 +75,23 @@ export default function DriverBeranda() {
         0
       );
 
+      // Ambil tawaran terbaru driver ini untuk tiap request (tawar balik / tawaran terkirim)
+      const offerEntries = await Promise.all(
+        incoming.map(async (item) => {
+          try {
+            const offersRes = await api.get(`/orders/${item.id}/offers`);
+            const offerList = Array.isArray(offersRes.data?.data)
+              ? offersRes.data.data
+              : [];
+            return [item.id, offerList[0] || null];
+          } catch {
+            return [item.id, null];
+          }
+        })
+      );
+
       setPendingOrders(incoming);
+      setOfferMap(Object.fromEntries(offerEntries));
       setActiveTrip(running || null);
       setTodayStats({
         count: completedToday.length,
@@ -233,6 +251,44 @@ export default function DriverBeranda() {
           overflowY: 'auto',
         }}
       >
+        {/* Banner: data kendaraan belum lengkap */}
+        {!vehicle.lengkap && (
+          <Card
+            to="/driver/profil"
+            style={{
+              background: '#FEF6E7',
+              boxShadow: '0 0 0 1.5px #F59E0B',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '12px',
+            }}
+          >
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 800, color: '#4A2C03' }}>
+                Lengkapi data kendaraan
+              </div>
+              <div style={{ fontSize: '12px', color: '#6B4308' }}>
+                Jenis kendaraan dan plat nomor wajib diisi sebelum bisa
+                menerima atau menawar order.
+              </div>
+            </div>
+            <span
+              style={{
+                background: '#F59E0B',
+                color: '#3B2402',
+                borderRadius: '99px',
+                padding: '5px 11px',
+                fontSize: '11px',
+                fontWeight: 800,
+                flex: 'none',
+              }}
+            >
+              Isi sekarang
+            </span>
+          </Card>
+        )}
+
         {/* Kartu Kendaraan & Status Operasional */}
         {isOnline ? (
           <Card
@@ -292,7 +348,7 @@ export default function DriverBeranda() {
               </div>
               <div>
                 <div style={{ fontWeight: 800, color: '#0B4F4A' }}>
-                  Siap menerima order
+                  {vehicle.lengkap ? 'Siap menerima order' : 'Status ON'}
                 </div>
                 <div style={{ fontSize: '12px', color: '#0B5F59' }}>
                   {vehicleLabel} · {platLabel}
@@ -518,6 +574,28 @@ export default function DriverBeranda() {
             const orderVehicle =
               order.jenis_kendaraan === 'mobil' ? 'Mobil' : 'Motor';
 
+            const requestedPax = Number(order.jumlah_penumpang) || 1;
+            const isMismatch =
+              !isJastip &&
+              Boolean(order.jenis_kendaraan) &&
+              Boolean(vehicle.jenis_kendaraan) &&
+              order.jenis_kendaraan !== vehicle.jenis_kendaraan;
+            const isOverCapacity =
+              !isJastip &&
+              Boolean(vehicle.kapasitas_penumpang) &&
+              requestedPax > vehicle.kapasitas_penumpang;
+
+            const latestOffer = offerMap[order.id] || null;
+            const hasCounter =
+              latestOffer?.offered_by === 'customer' &&
+              latestOffer?.status === 'pending';
+            const hasMyBid =
+              latestOffer?.offered_by === 'driver' &&
+              latestOffer?.status === 'pending';
+
+            const quickBlocked =
+              !vehicle.lengkap || !isOnline || isMismatch || isOverCapacity;
+
             return (
               <Card
                 key={order.id}
@@ -540,15 +618,22 @@ export default function DriverBeranda() {
                       display: 'flex',
                       alignItems: 'center',
                       gap: '8px',
+                      minWidth: 0,
                     }}
                   >
                     <Chip variant={isJastip ? 'warning' : 'teal'}>
                       {isJastip ? 'JasTip' : `AnJem · ${orderVehicle}`}
                     </Chip>
-                    <span style={{ fontSize: '11.5px', color: '#5B6678' }}>
-                      {order.waktu_berangkat === 'jadwal'
-                        ? 'Jadwal'
-                        : 'Sekarang'}
+                    <span
+                      style={{
+                        fontSize: '11.5px',
+                        color: '#5B6678',
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                      }}
+                    >
+                      {waktuLabel(order)}
                     </span>
                   </div>
 
@@ -557,11 +642,30 @@ export default function DriverBeranda() {
                       fontWeight: 800,
                       fontSize: '15px',
                       color: '#0F766E',
+                      flex: 'none',
                     }}
                   >
                     Rp {formatRibuan(order.ongkir)}
                   </span>
                 </div>
+
+                {/* Penanda status request */}
+                {(isMismatch || isOverCapacity || hasCounter || hasMyBid) && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                    {isMismatch && <Chip variant="danger">Beda kendaraan</Chip>}
+                    {isOverCapacity && (
+                      <Chip variant="danger">Melebihi kapasitas</Chip>
+                    )}
+                    {hasCounter && (
+                      <Chip variant="warning">
+                        Tawar balik Rp {formatRibuan(latestOffer.offered_price)}
+                      </Chip>
+                    )}
+                    {hasMyBid && (
+                      <Chip variant="neutral">Tawaranmu terkirim</Chip>
+                    )}
+                  </div>
+                )}
 
                 {/* Info Pemesan / Barang */}
                 <div style={{ fontWeight: 700, fontSize: '13px' }}>
@@ -644,23 +748,25 @@ export default function DriverBeranda() {
                       textDecoration: 'none',
                     }}
                   >
-                    Detail / Nego
+                    {hasCounter ? 'Lihat tawar balik' : 'Detail / Nego'}
                   </Link>
 
                   <button
                     type="button"
-                    disabled={acceptingId === order.id}
+                    disabled={acceptingId === order.id || quickBlocked}
                     onClick={() => handleQuickAccept(order)}
                     style={{
                       flex: 1,
                       height: '40px',
                       borderRadius: '11px',
                       border: 0,
-                      background: '#0F766E',
-                      color: '#fff',
+                      background: quickBlocked ? '#E8EAEE' : '#0F766E',
+                      color: quickBlocked ? '#64748B' : '#fff',
                       font: "700 12.5px 'Plus Jakarta Sans',system-ui,sans-serif",
                       cursor:
-                        acceptingId === order.id ? 'not-allowed' : 'pointer',
+                        acceptingId === order.id || quickBlocked
+                          ? 'not-allowed'
+                          : 'pointer',
                     }}
                   >
                     {acceptingId === order.id ? 'Memproses...' : 'Terima'}

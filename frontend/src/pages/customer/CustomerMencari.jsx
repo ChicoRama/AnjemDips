@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import api from '../../api/axios';
 import Button from '../../components/Button';
+import { waktuLabel } from '../../utils/format';
 
 function formatRibuan(value) {
   const num = Number(value) || 0;
@@ -83,8 +84,7 @@ export default function CustomerMencari() {
   const vehicleLabel =
     order?.jenis_kendaraan === 'motor' ? 'Motor' : 'Mobil';
   const penumpangCount = order?.jumlah_penumpang || 1;
-  const waktuLabel =
-    order?.waktu_berangkat === 'jadwal' ? 'Jadwal' : 'Sekarang';
+  const waktuText = waktuLabel(order);
 
   const handleCancel = async () => {
     if (!order?.id) {
@@ -338,8 +338,8 @@ export default function CustomerMencari() {
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>
             <span style={{ color: '#5B6678' }}>
               {isJastip
-                ? `JasTip · ${order?.nama_barang || 'Titip barang'} · ${waktuLabel}`
-                : `${vehicleLabel} · ${penumpangCount} penumpang · ${waktuLabel}`}
+                ? `JasTip · ${order?.nama_barang || 'Titip barang'} · ${waktuText}`
+                : `${vehicleLabel} · ${penumpangCount} penumpang · ${waktuText}`}
             </span>
             <span style={{ fontWeight: 800 }}>
               Rp {formatRibuan(order?.ongkir ?? 15000)}

@@ -75,10 +75,10 @@ export const updateDriverVehicle = async (req, res) => {
     let cleanKapasitas = 1;
     if (normalizedVehicle === 'mobil') {
       const parsed = Number(kapasitas_penumpang);
-      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10) {
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 8) {
         return res.status(400).json({
           success: false,
-          message: 'Kapasitas penumpang mobil harus antara 1 hingga 10 orang.',
+          message: 'Kapasitas penumpang mobil harus antara 1 hingga 8 orang.',
         });
       }
       cleanKapasitas = parsed;
@@ -110,4 +110,5 @@ export const updateDriverVehicle = async (req, res) => {
     });
   }
 };
+
 

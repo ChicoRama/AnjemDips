@@ -4,6 +4,7 @@ import api from '../../api/axios';
 import Card from '../../components/Card';
 import Chip from '../../components/Chip';
 import BottomNav from '../../components/BottomNav';
+import { waktuLabel } from '../../utils/format';
 
 const ACTIVE_STATUSES = [
   'pending',
@@ -284,8 +285,8 @@ export default function CustomerPesanan() {
                       >
                         {isJastip
                           ? order.nama_barang ||
-                            `${order.titik_jemput} â†’ ${order.titik_antar}`
-                          : `${order.titik_jemput} â†’ ${order.titik_antar}`}
+                            `${order.titik_jemput} → ${order.titik_antar}`
+                          : `${order.titik_jemput} → ${order.titik_antar}`}
                       </div>
                     </div>
 
@@ -304,17 +305,34 @@ export default function CustomerPesanan() {
                         ? hargaBarang > 0
                           ? `Barang Rp ${formatRibuan(hargaBarang)} + upah Rp ${formatRibuan(ongkir)}`
                           : `Upah Rp ${formatRibuan(ongkir)}`
-                        : `${order.jumlah_penumpang || 1} penumpang · ${
-                            order.waktu_berangkat === 'jadwal'
-                              ? 'Jadwal'
-                              : 'Sekarang'
-                          }`}
+                        : `${order.jumlah_penumpang || 1} penumpang · ${waktuLabel(order)}`}
                     </span>
                     <span style={{ fontWeight: 800 }}>
                       Rp {formatRibuan(totalHarga)}
                     </span>
                   </div>
 
+                  <div style={{ display: 'flex', gap: '10px' }}>
+                    <Link
+                      to="/customer/tawaran"
+                      state={{ order }}
+                      style={{
+                        flex: 1,
+                        height: '44px',
+                        borderRadius: '12px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontWeight: 700,
+                        fontSize: '13px',
+                        textDecoration: 'none',
+                        boxSizing: 'border-box',
+                        background: '#0F766E',
+                        color: '#fff',
+                      }}
+                    >
+                      Lihat tawaran
+                    </Link>
                   <button
                     type="button"
                     disabled={cancellingId === order.id}
@@ -332,7 +350,7 @@ export default function CustomerPesanan() {
                       background: '#fff',
                       color: '#B91C1C',
                       boxShadow: 'inset 0 0 0 1.5px #F3C4C4',
-                      width: '100%',
+                      flex: 1,
                       cursor:
                         cancellingId === order.id ? 'not-allowed' : 'pointer',
                       opacity: cancellingId === order.id ? 0.6 : 1,
@@ -342,6 +360,7 @@ export default function CustomerPesanan() {
                       ? 'Membatalkan...'
                       : 'Batalkan pesanan'}
                   </button>
+                  </div>
                 </Card>
               );
             }
@@ -438,11 +457,9 @@ export default function CustomerPesanan() {
                     <div style={{ color: '#5B6678', fontSize: '12px' }}>
                       {isJastip && order.nama_barang
                         ? order.nama_barang
-                        : `Hari ini · ${
-                            order.waktu_berangkat === 'jadwal'
-                              ? 'Jadwal'
-                              : 'Berangkat sekarang'
-                          }`}
+                        : order.waktu_berangkat === 'jadwal'
+                        ? waktuLabel(order)
+                        : 'Hari ini · Berangkat sekarang'}
                     </div>
                   </div>
 
@@ -639,10 +656,10 @@ export default function CustomerPesanan() {
                       Hubungi
                     </a>
                   ) : (
-                    <Link
-                      to="/customer/lacak"
-                      state={{ order }}
+                    <span
+                      aria-disabled="true"
                       style={{
+                        opacity: 0.5,
                         height: '44px',
                         borderRadius: '12px',
                         display: 'flex',
@@ -659,7 +676,7 @@ export default function CustomerPesanan() {
                       }}
                     >
                       Hubungi
-                    </Link>
+                    </span>
                   )}
                 </div>
               </Card>
@@ -673,4 +690,5 @@ export default function CustomerPesanan() {
     </div>
   );
 }
+
 

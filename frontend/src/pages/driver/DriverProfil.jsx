@@ -22,11 +22,11 @@ export default function DriverProfil() {
   const initialVehicle = getDriverVehicleProfile(user);
 
   const [vehicle, setVehicle] = useState(initialVehicle);
-  const [editingVehicle, setEditingVehicle] = useState(false);
+  const [editingVehicle, setEditingVehicle] = useState(!initialVehicle.lengkap);
   const [jenisKendaraan, setJenisKendaraan] = useState(
-    initialVehicle.jenis_kendaraan
+    initialVehicle.jenis_kendaraan || 'motor'
   );
-  const [platNomor, setPlatNomor] = useState(initialVehicle.plat_nomor);
+  const [platNomor, setPlatNomor] = useState(initialVehicle.plat_nomor || '');
   const [kapasitas, setKapasitas] = useState(
     String(initialVehicle.kapasitas_penumpang || 4)
   );
@@ -76,11 +76,7 @@ export default function DriverProfil() {
       });
       const saved = res.data.user;
       updateUser(saved);
-      setVehicle({
-        jenis_kendaraan: saved.jenis_kendaraan,
-        plat_nomor: saved.plat_nomor,
-        kapasitas_penumpang: saved.kapasitas_penumpang,
-      });
+      setVehicle(getDriverVehicleProfile(saved));
       setEditingVehicle(false);
     } catch (err) {
       setVehicleError(
@@ -350,7 +346,7 @@ export default function DriverProfil() {
               >
                 <span style={{ color: '#5B6678' }}>Jenis kendaraan</span>
                 <span style={{ fontWeight: 700, textTransform: 'capitalize' }}>
-                  {vehicle.jenis_kendaraan}
+                  {vehicle.jenis_kendaraan || 'Belum diisi'}
                 </span>
               </div>
 
@@ -364,7 +360,7 @@ export default function DriverProfil() {
                 }}
               >
                 <span style={{ color: '#5B6678' }}>Plat nomor</span>
-                <span style={{ fontWeight: 700 }}>{vehicle.plat_nomor}</span>
+                <span style={{ fontWeight: 700 }}>{vehicle.plat_nomor || 'Belum diisi'}</span>
               </div>
 
               {vehicle.jenis_kendaraan === 'mobil' && (
@@ -482,4 +478,5 @@ export default function DriverProfil() {
     </div>
   );
 }
+
 

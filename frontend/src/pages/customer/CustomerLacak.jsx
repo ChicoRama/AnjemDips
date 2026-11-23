@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import api from '../../api/axios';
+import { waktuLabel } from '../../utils/format';
 
 const ACTIVE_STATUSES = [
   'accepted',
@@ -416,6 +417,11 @@ export default function CustomerLacak() {
             <div style={{ color: '#5B6678', fontSize: '12px' }}>
               {vehicleLabel} · {platNomor}
             </div>
+            {order?.waktu_berangkat === 'jadwal' && (
+              <div style={{ color: '#0F766E', fontSize: '11.5px', fontWeight: 700 }}>
+                {waktuLabel(order)}
+              </div>
+            )}
           </div>
           <div style={{ textAlign: 'right' }}>
             <div style={{ color: '#5B6678', fontSize: '11px' }}>
@@ -484,10 +490,10 @@ export default function CustomerLacak() {
               Hubungi
             </a>
           ) : (
-            <Link
-              to="/customer/lacak"
-              state={order ? { order } : undefined}
+            <span
+              aria-disabled="true"
               style={{
+                opacity: 0.5,
                 height: '46px',
                 borderRadius: '14px',
                 display: 'flex',
@@ -517,7 +523,7 @@ export default function CustomerLacak() {
                 <path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z" />
               </svg>
               Hubungi
-            </Link>
+            </span>
           )}
 
           {canCancel && (

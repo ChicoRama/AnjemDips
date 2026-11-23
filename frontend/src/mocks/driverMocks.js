@@ -3,13 +3,23 @@
 
 export const DRIVER_NEGO_INCREMENTS = [2000, 3000, 5000];
 
-// Profil kendaraan diambil dari data user (backend); fallback hanya untuk tampilan awal.
+// Profil kendaraan diambil apa adanya dari data user (backend).
+// Jika belum diisi, nilainya null dan `lengkap` bernilai false (tidak ada data palsu).
 export function getDriverVehicleProfile(user) {
-  const jenis = user?.jenis_kendaraan || 'motor';
+  const jenis = user?.jenis_kendaraan || null;
+  const plat = user?.plat_nomor || null;
+
+  let kapasitas = null;
+  if (jenis === 'mobil') {
+    kapasitas = Number(user?.kapasitas_penumpang) || 4;
+  } else if (jenis === 'motor') {
+    kapasitas = 1;
+  }
+
   return {
     jenis_kendaraan: jenis,
-    plat_nomor: user?.plat_nomor || 'H 1234 AB',
-    kapasitas_penumpang:
-      user?.kapasitas_penumpang ?? (jenis === 'mobil' ? 4 : 1),
+    plat_nomor: plat,
+    kapasitas_penumpang: kapasitas,
+    lengkap: Boolean(jenis && plat),
   };
 }

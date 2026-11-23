@@ -10,6 +10,7 @@ import {
   getOrderOffers,
   createOrderOffer,
   acceptOrderOffer,
+  rejectOrderOffer,
 } from '../controllers/offerController.js';
 import authMiddleware from '../middleware/authMiddleware.js';
 
@@ -27,6 +28,8 @@ router.delete('/:id', deleteOrder);
 router.get('/:id/offers', getOrderOffers);
 router.post('/:id/offers', createOrderOffer);
 router.patch('/:id/offers/:offerId/accept', acceptOrderOffer);
+router.patch('/:id/offers/:offerId/reject', rejectOrderOffer);
 
 export default router;
+
 

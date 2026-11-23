@@ -12,7 +12,15 @@ function formatRibuan(value) {
   return num.toLocaleString('id-ID');
 }
 
-function OfferCard({ order, offer, busy, onAccept, onCounter, onError }) {
+function OfferCard({
+  order,
+  offer,
+  busy,
+  onAccept,
+  onCounter,
+  onReject,
+  onError,
+}) {
   const driver = offer.driver || {};
   const driverName = driver.nama || 'Driver';
   const driverInitial = (driverName.trim()[0] || 'D').toUpperCase();
@@ -59,10 +67,14 @@ function OfferCard({ order, offer, busy, onAccept, onCounter, onError }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 800 }}>{driverName}</div>
           <div style={{ color: '#5B6678', fontSize: '12px' }}>
-            Menunggu jawaban atas tawaranmu Rp {formatRibuan(offer.offered_price)}
+            {offer.status === 'rejected'
+              ? `Tawaranmu Rp ${formatRibuan(offer.offered_price)} ditolak driver. Tunggu tawaran baru dari driver.`
+              : `Menunggu jawaban atas tawaranmu Rp ${formatRibuan(offer.offered_price)}`}
           </div>
         </div>
-        <Chip variant="warning">Menunggu</Chip>
+        <Chip variant={offer.status === 'rejected' ? 'danger' : 'warning'}>
+          {offer.status === 'rejected' ? 'Ditolak' : 'Menunggu'}
+        </Chip>
       </Card>
     );
   }
@@ -257,6 +269,15 @@ function OfferCard({ order, offer, busy, onAccept, onCounter, onError }) {
           >
             {busy ? 'Mengirim...' : 'Kirim tawaran baru'}
           </Button>
+
+          <Button
+            type="button"
+            variant="dangerOutline"
+            disabled={busy}
+            onClick={() => onReject(offer)}
+          >
+            Tolak tawaran
+          </Button>
         </>
       ) : (
         <>
@@ -347,6 +368,15 @@ function OfferCard({ order, offer, busy, onAccept, onCounter, onError }) {
           >
             {showCounter ? 'Kirim tawaran' : 'Tawar balik'}
           </Button>
+
+          <Button
+            type="button"
+            variant="dangerOutline"
+            disabled={busy}
+            onClick={() => onReject(offer)}
+          >
+            Tolak tawaran
+          </Button>
         </>
       )}
     </Card>
@@ -396,7 +426,12 @@ export default function CustomerTawaran() {
       for (const offer of all) {
         if (seen.has(offer.driver_id)) continue;
         seen.add(offer.driver_id);
-        if (offer.status === 'pending') latestPending.push(offer);
+        if (
+          offer.status === 'pending' ||
+          (offer.status === 'rejected' && offer.offered_by === 'customer')
+        ) {
+          latestPending.push(offer);
+        }
       }
       setOffers(latestPending);
     } catch {
@@ -441,6 +476,20 @@ export default function CustomerTawaran() {
       await sync();
     } catch (err) {
       setError(err.response?.data?.message || 'Gagal mengirim tawaran balik.');
+    } finally {
+      setBusyDriverId(null);
+    }
+  };
+
+  const handleReject = async (offer) => {
+    if (!order?.id) return;
+    setError('');
+    setBusyDriverId(offer.driver_id);
+    try {
+      await api.patch(`/orders/${order.id}/offers/${offer.id}/reject`);
+      await sync();
+    } catch (err) {
+      setError(err.response?.data?.message || 'Gagal menolak tawaran.');
     } finally {
       setBusyDriverId(null);
     }
@@ -607,6 +656,7 @@ export default function CustomerTawaran() {
               busy={busyDriverId === offer.driver_id}
               onAccept={handleAccept}
               onCounter={handleCounter}
+              onReject={handleReject}
               onError={setError}
             />
           ))

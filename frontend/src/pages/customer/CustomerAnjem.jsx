@@ -10,7 +10,7 @@ function formatRibuan(digits) {
   return Number(digits).toLocaleString('id-ID');
 }
 
-const MAX_PENUMPANG = { motor: 1, mobil: 6 };
+const MAX_PENUMPANG = { motor: 1, mobil: 8 };
 
 export default function CustomerAnjem() {
   const navigate = useNavigate();

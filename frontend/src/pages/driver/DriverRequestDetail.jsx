@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../api/axios';
@@ -6,11 +6,7 @@ import Card from '../../components/Card';
 import Chip from '../../components/Chip';
 import Button from '../../components/Button';
 import { getDriverVehicleProfile } from '../../mocks/driverMocks';
-
-function formatRibuan(value) {
-  const num = Number(value) || 0;
-  return num.toLocaleString('id-ID');
-}
+import { formatRibuan, waktuLabel } from '../../utils/format';
 
 export default function DriverRequestDetail() {
   const { id } = useParams();
@@ -22,8 +18,9 @@ export default function DriverRequestDetail() {
   const [loading, setLoading] = useState(!location.state?.order);
   const [accepting, setAccepting] = useState(false);
   const [error, setError] = useState('');
-  const [customerOffer, setCustomerOffer] = useState(null);
+  const [latestOffer, setLatestOffer] = useState(null);
   const [acceptingOffer, setAcceptingOffer] = useState(false);
+  const [rejectingOffer, setRejectingOffer] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -51,47 +48,55 @@ export default function DriverRequestDetail() {
     };
   }, [id]);
 
-  // Pantau tawaran balik dari pemesan
+  // Pantau tawaran terbaru antara driver ini dan pemesan
+  const loadOffers = useCallback(async () => {
+    try {
+      const res = await api.get(`/orders/${id}/offers`);
+      const list = Array.isArray(res.data?.data) ? res.data.data : [];
+      setLatestOffer(list[0] || null);
+    } catch {
+      // Abaikan gangguan jaringan sementara
+    }
+  }, [id]);
+
   useEffect(() => {
-    let isMounted = true;
-
-    const loadOffers = async () => {
-      try {
-        const res = await api.get(`/orders/${id}/offers`);
-        const list = Array.isArray(res.data?.data) ? res.data.data : [];
-        const latest = list[0];
-        if (isMounted) {
-          setCustomerOffer(
-            latest &&
-              latest.offered_by === 'customer' &&
-              latest.status === 'pending'
-              ? latest
-              : null
-          );
-        }
-      } catch {
-        // Abaikan gangguan jaringan sementara
-      }
-    };
-
     loadOffers();
     const interval = setInterval(loadOffers, 5000);
-    return () => {
-      isMounted = false;
-      clearInterval(interval);
-    };
-  }, [id]);
+    return () => clearInterval(interval);
+  }, [loadOffers]);
+
+  const customerOffer =
+    latestOffer &&
+    latestOffer.offered_by === 'customer' &&
+    latestOffer.status === 'pending'
+      ? latestOffer
+      : null;
+  const myPendingOffer =
+    latestOffer &&
+    latestOffer.offered_by === 'driver' &&
+    latestOffer.status === 'pending'
+      ? latestOffer
+      : null;
+  const myOfferRejected =
+    latestOffer &&
+    latestOffer.offered_by === 'driver' &&
+    latestOffer.status === 'rejected';
 
   const vehicle = getDriverVehicleProfile(user);
   const isJastip = order?.jenis_layanan === 'jastip';
 
-  const driverCapacity =
-    vehicle.jenis_kendaraan === 'mobil'
-      ? Number(vehicle.kapasitas_penumpang) || 4
-      : 1;
+  const driverCapacity = vehicle.kapasitas_penumpang || 1;
   const requestedPassengers = Number(order?.jumlah_penumpang) || 1;
-  const isOverCapacity = !isJastip && requestedPassengers > driverCapacity;
+  const isOverCapacity =
+    !isJastip && vehicle.lengkap && requestedPassengers > driverCapacity;
   const excessPassengers = Math.max(0, requestedPassengers - driverCapacity);
+
+  const isMismatch =
+    !isJastip &&
+    Boolean(order?.jenis_kendaraan) &&
+    Boolean(vehicle.jenis_kendaraan) &&
+    order.jenis_kendaraan !== vehicle.jenis_kendaraan;
+  const vehicleBlocked = !vehicle.lengkap || isMismatch;
 
   const hargaBarang = Number(order?.perkiraan_harga_barang) || 0;
   const ongkir = Number(order?.ongkir) || 0;
@@ -138,6 +143,32 @@ export default function DriverRequestDetail() {
       setAcceptingOffer(false);
     }
   };
+
+  const handleRejectCustomerOffer = async () => {
+    if (!order?.id || !customerOffer) return;
+    setError('');
+    setRejectingOffer(true);
+    try {
+      await api.patch(`/orders/${order.id}/offers/${customerOffer.id}/reject`);
+      await loadOffers();
+    } catch (err) {
+      setError(
+        err.response?.data?.message || 'Gagal menolak tawaran pemesan.'
+      );
+    } finally {
+      setRejectingOffer(false);
+    }
+  };
+
+  const blockedLabel = !vehicle.lengkap
+    ? 'Lengkapi data kendaraan dulu'
+    : isMismatch
+    ? 'Kendaraan tidak sesuai permintaan'
+    : isOverCapacity
+    ? 'Melebihi kapasitas, silakan tawar'
+    : !user?.is_online
+    ? 'Aktifkan status ON dulu'
+    : `Terima Rp ${formatRibuan(ongkir)}`;
 
   return (
     <div
@@ -314,15 +345,43 @@ export default function DriverRequestDetail() {
                 </div>
               </div>
 
+              <div style={{ height: '1px', background: '#EEF0F3' }} />
+              <div style={{ fontSize: '12px', color: '#475569' }}>
+                <strong>Berangkat:</strong> {waktuLabel(order)}
+              </div>
+
               {order.catatan && (
-                <>
-                  <div style={{ height: '1px', background: '#EEF0F3' }} />
-                  <div style={{ fontSize: '12px', color: '#475569' }}>
-                    <strong>Catatan:</strong> {order.catatan}
-                  </div>
-                </>
+                <div style={{ fontSize: '12px', color: '#475569' }}>
+                  <strong>Catatan:</strong> {order.catatan}
+                </div>
               )}
             </Card>
+
+            {/* Peringatan kendaraan tidak sesuai / belum lengkap */}
+            {!vehicle.lengkap && (
+              <Card
+                to="/driver/profil"
+                style={{
+                  background: '#FEF6E7',
+                  boxShadow: '0 0 0 1.5px #F59E0B',
+                  color: '#6B4308',
+                  fontSize: '12.5px',
+                  fontWeight: 600,
+                }}
+              >
+                Data kendaraanmu belum lengkap. Ketuk di sini untuk melengkapi
+                sebelum menerima atau menawar order.
+              </Card>
+            )}
+
+            {isMismatch && (
+              <Card variant="danger" style={{ fontSize: '12.5px', color: '#7F1D1D' }}>
+                Order ini meminta{' '}
+                <strong>{order.jenis_kendaraan}</strong>, sedangkan kendaraanmu{' '}
+                <strong>{vehicle.jenis_kendaraan}</strong>. Kamu tidak bisa
+                menerima atau menawar order ini.
+              </Card>
+            )}
 
             {/* Kartu Detail Khusus AnJem (Kapasitas) vs JasTip (Barang) */}
             {isJastip ? (
@@ -422,7 +481,7 @@ export default function DriverRequestDetail() {
                       Kapasitasmu
                     </div>
                     <div style={{ fontWeight: 800, fontSize: '18px' }}>
-                      {driverCapacity} org
+                      {vehicle.lengkap ? `${driverCapacity} org` : '-'}
                     </div>
                   </div>
                   <div
@@ -456,7 +515,8 @@ export default function DriverRequestDetail() {
                 {isOverCapacity && (
                   <div style={{ fontSize: '12px', color: '#7F1D1D' }}>
                     Jumlah penumpang melebihi kapasitas kendaraanmu. Kamu bisa
-                    menawar harga ekstra lewat tombol “Tawar harga”.
+                    menawar harga ekstra lewat tombol “Tawar harga”, lalu
+                    pemesan menyesuaikan jumlah penumpang.
                   </div>
                 )}
               </Card>
@@ -491,6 +551,27 @@ export default function DriverRequestDetail() {
                 Rp {formatRibuan(ongkir)}
               </div>
             </Card>
+
+            {/* Status tawaran milik driver ini */}
+            {myPendingOffer && (
+              <Card
+                variant="soft"
+                style={{ fontSize: '12.5px', color: '#0B4F4A', fontWeight: 600 }}
+              >
+                Tawaranmu Rp {formatRibuan(myPendingOffer.offered_price)} sudah
+                terkirim. Menunggu jawaban pemesan.
+              </Card>
+            )}
+
+            {myOfferRejected && (
+              <Card
+                variant="danger"
+                style={{ fontSize: '12.5px', color: '#7F1D1D', fontWeight: 600 }}
+              >
+                Tawaranmu Rp {formatRibuan(latestOffer.offered_price)} ditolak
+                pemesan. Kamu bisa mengajukan harga baru.
+              </Card>
+            )}
           </>
         )}
 
@@ -537,39 +618,52 @@ export default function DriverRequestDetail() {
                   {customerOffer.adjusted_passengers} orang.
                 </div>
               ) : null}
-              <Button
-                type="button"
-                variant="primary"
-                height={44}
-                disabled={acceptingOffer}
-                onClick={handleAcceptCustomerOffer}
-              >
-                {acceptingOffer
-                  ? 'Menyetujui...'
-                  : `Setuju Rp ${formatRibuan(customerOffer.offered_price)}`}
-              </Button>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <Button
+                  type="button"
+                  variant="dangerOutline"
+                  height={44}
+                  disabled={rejectingOffer || acceptingOffer}
+                  onClick={handleRejectCustomerOffer}
+                  style={{ flex: 1 }}
+                >
+                  {rejectingOffer ? 'Menolak...' : 'Tolak'}
+                </Button>
+                <Button
+                  type="button"
+                  variant="primary"
+                  height={44}
+                  disabled={acceptingOffer || rejectingOffer}
+                  onClick={handleAcceptCustomerOffer}
+                  style={{ flex: 2 }}
+                >
+                  {acceptingOffer
+                    ? 'Menyetujui...'
+                    : `Setuju Rp ${formatRibuan(customerOffer.offered_price)}`}
+                </Button>
+              </div>
             </Card>
           )}
 
           <Button
             type="button"
             variant="primary"
-            disabled={accepting || isOverCapacity || !user?.is_online}
+            disabled={
+              accepting ||
+              vehicleBlocked ||
+              isOverCapacity ||
+              !user?.is_online
+            }
             onClick={handleAcceptOrder}
           >
-            {accepting
-              ? 'Menerima pesanan...'
-              : isOverCapacity
-              ? 'Melebihi kapasitas, silakan tawar'
-              : !user?.is_online
-              ? 'Aktifkan status ON dulu'
-              : `Terima Rp ${formatRibuan(ongkir)}`}
+            {accepting ? 'Menerima pesanan...' : blockedLabel}
           </Button>
 
           <Button
             to={`/driver/nego/${order.id}`}
             state={{ order }}
             variant="outline"
+            disabled={vehicleBlocked}
           >
             Tawar harga
           </Button>
