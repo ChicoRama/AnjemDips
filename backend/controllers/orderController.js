@@ -1,10 +1,30 @@
 import supabase from '../config/supabase.js';
+import { checkDriverEligibility } from '../utils/driverEligibility.js';
 
 const ORDER_SELECT_QUERY = `
   *,
   customer:users!customer_id(id, nama, nim, no_wa),
   driver:users!driver_id(id, nama, nim, no_wa, jenis_kendaraan, plat_nomor, kapasitas_penumpang, is_online)
 `;
+
+const MAX_ACTIVE_ORDERS_PER_CUSTOMER = 3;
+const PENDING_EXPIRE_MINUTES = 30;
+const MIN_ONGKIR = 2000;
+const MAX_ONGKIR = 1000000;
+const ACTIVE_STATUSES = ['pending', 'accepted', 'on_progress'];
+
+const hasValue = (v) => v !== undefined && v !== null && String(v).trim() !== '';
+
+// Driver tidak boleh melihat kontak pemesan sebelum order diterima
+const hideCustomerContact = (order, user) => {
+  if (user.role === 'driver' && order.status === 'pending' && order.customer) {
+    return {
+      ...order,
+      customer: { ...order.customer, nim: null, no_wa: null },
+    };
+  }
+  return order;
+};
 
 // POST /api/orders (Customer membuat pesanan baru)
 export const createOrder = async (req, res) => {
@@ -31,17 +51,12 @@ export const createOrder = async (req, res) => {
     } = req.body;
 
     if (
-      [titik_jemput, titik_antar].some(
-        (v) => typeof v !== 'string' || v.trim() === ''
-      )
+      !jenis_layanan ||
+      typeof titik_jemput !== 'string' ||
+      typeof titik_antar !== 'string' ||
+      titik_jemput.trim() === '' ||
+      titik_antar.trim() === ''
     ) {
-      return res.status(400).json({
-        success: false,
-        message: 'Jenis layanan, titik jemput, dan titik antar wajib diisi.',
-      });
-    }
-
-    if (!jenis_layanan) {
       return res.status(400).json({
         success: false,
         message: 'Jenis layanan, titik jemput, dan titik antar wajib diisi.',
@@ -55,13 +70,23 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    // Validasi kolom tambahan opsional (aman untuk payload lama)
+    if (titik_jemput.trim().length > 200 || titik_antar.trim().length > 200) {
+      return res.status(400).json({
+        success: false,
+        message: 'Titik jemput/antar maksimal 200 karakter.',
+      });
+    }
+
+    if (typeof catatan === 'string' && catatan.trim().length > 500) {
+      return res.status(400).json({
+        success: false,
+        message: 'Catatan maksimal 500 karakter.',
+      });
+    }
+
+    // Jenis kendaraan (opsional)
     let cleanJenisKendaraan = null;
-    if (
-      jenis_kendaraan !== undefined &&
-      jenis_kendaraan !== null &&
-      String(jenis_kendaraan).trim() !== ''
-    ) {
+    if (hasValue(jenis_kendaraan)) {
       const normalizedVehicle = String(jenis_kendaraan).trim().toLowerCase();
       if (!['motor', 'mobil'].includes(normalizedVehicle)) {
         return res.status(400).json({
@@ -72,37 +97,40 @@ export const createOrder = async (req, res) => {
       cleanJenisKendaraan = normalizedVehicle;
     }
 
+    // Jumlah penumpang: hanya relevan untuk AnJem (JasTip tidak mengirimnya)
     let cleanJumlahPenumpang = null;
-    if (
-      jumlah_penumpang !== undefined &&
-      jumlah_penumpang !== null &&
-      jumlah_penumpang !== ''
-    )
-    
-    if (cleanJenisKendaraan === 'motor' && (cleanJumlahPenumpang || 1) > 1) {
-    return res.status(400).json({
-    success: false,
-    message: 'Motor hanya dapat mengangkut 1 penumpang.',
-    });
-}
-    
-    {
-      const parsedPenumpang = Number(jumlah_penumpang);
-      if (!Number.isInteger(parsedPenumpang) || parsedPenumpang < 1) {
+    if (jenis_layanan === 'anjem') {
+      if (hasValue(jumlah_penumpang)) {
+        const parsedPenumpang = Number(jumlah_penumpang);
+        if (!Number.isInteger(parsedPenumpang) || parsedPenumpang < 1) {
+          return res.status(400).json({
+            success: false,
+            message: 'Jumlah penumpang harus berupa angka minimal 1.',
+          });
+        }
+        cleanJumlahPenumpang = parsedPenumpang;
+      } else {
+        cleanJumlahPenumpang = 1;
+      }
+
+      if (cleanJenisKendaraan === 'motor' && cleanJumlahPenumpang > 1) {
         return res.status(400).json({
           success: false,
-          message: 'Jumlah penumpang harus berupa angka minimal 1.',
+          message: 'Motor hanya dapat mengangkut 1 penumpang.',
         });
       }
-      cleanJumlahPenumpang = parsedPenumpang;
+
+      if (cleanJumlahPenumpang > 10) {
+        return res.status(400).json({
+          success: false,
+          message: 'Jumlah penumpang maksimal 10 orang.',
+        });
+      }
     }
 
+    // Waktu berangkat
     let cleanWaktuBerangkat = null;
-    if (
-      waktu_berangkat !== undefined &&
-      waktu_berangkat !== null &&
-      String(waktu_berangkat).trim() !== ''
-    ) {
+    if (hasValue(waktu_berangkat)) {
       const normalizedWaktu = String(waktu_berangkat).trim().toLowerCase();
       if (!['sekarang', 'jadwal'].includes(normalizedWaktu)) {
         return res.status(400).json({
@@ -114,11 +142,7 @@ export const createOrder = async (req, res) => {
     }
 
     let cleanJadwalAt = null;
-    if (
-      jadwal_at !== undefined &&
-      jadwal_at !== null &&
-      String(jadwal_at).trim() !== ''
-    ) {
+    if (hasValue(jadwal_at)) {
       const parsedDate = Date.parse(jadwal_at);
       if (Number.isNaN(parsedDate)) {
         return res.status(400).json({
@@ -129,19 +153,19 @@ export const createOrder = async (req, res) => {
       cleanJadwalAt = new Date(parsedDate).toISOString();
     }
 
-    const cleanNamaBarang =
-      nama_barang !== undefined &&
-      nama_barang !== null &&
-      String(nama_barang).trim() !== ''
-        ? String(nama_barang).trim()
-        : null;
+    if (cleanWaktuBerangkat === 'jadwal') {
+      if (!cleanJadwalAt || Date.parse(cleanJadwalAt) < Date.now() - 60 * 1000) {
+        return res.status(400).json({
+          success: false,
+          message: 'Waktu jadwal harus diisi dan tidak boleh di masa lalu.',
+        });
+      }
+    }
+
+    const cleanNamaBarang = hasValue(nama_barang) ? String(nama_barang).trim() : null;
 
     let cleanPerkiraanHargaBarang = null;
-    if (
-      perkiraan_harga_barang !== undefined &&
-      perkiraan_harga_barang !== null &&
-      perkiraan_harga_barang !== ''
-    ) {
+    if (hasValue(perkiraan_harga_barang)) {
       const parsedHargaBarang = Number(perkiraan_harga_barang);
       if (Number.isNaN(parsedHargaBarang) || parsedHargaBarang < 0) {
         return res.status(400).json({
@@ -152,7 +176,34 @@ export const createOrder = async (req, res) => {
       cleanPerkiraanHargaBarang = parsedHargaBarang;
     }
 
-    const parsedOngkir = Number(ongkir) > 0 ? Number(ongkir) : 5000;
+    // Ongkir wajib valid (tidak lagi diam-diam jadi 5000)
+    const parsedOngkir = Number(ongkir);
+    if (
+      !Number.isInteger(parsedOngkir) ||
+      parsedOngkir < MIN_ONGKIR ||
+      parsedOngkir > MAX_ONGKIR
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: `Ongkir harus berupa angka bulat antara Rp ${MIN_ONGKIR.toLocaleString('id-ID')} dan Rp ${MAX_ONGKIR.toLocaleString('id-ID')}.`,
+      });
+    }
+
+    // Batasi jumlah order aktif per pemesan (anti spam)
+    const { count: activeCount, error: countError } = await supabase
+      .from('orders')
+      .select('id', { count: 'exact', head: true })
+      .eq('customer_id', req.user.id)
+      .in('status', ACTIVE_STATUSES);
+
+    if (countError) throw countError;
+
+    if ((activeCount || 0) >= MAX_ACTIVE_ORDERS_PER_CUSTOMER) {
+      return res.status(400).json({
+        success: false,
+        message: `Maksimal ${MAX_ACTIVE_ORDERS_PER_CUSTOMER} pesanan aktif sekaligus. Selesaikan atau batalkan pesanan lain dulu.`,
+      });
+    }
 
     const { data, error } = await supabase
       .from('orders')
@@ -195,6 +246,21 @@ export const createOrder = async (req, res) => {
 // GET /api/orders (Customer melihat pesanannya; Driver melihat order pending + order miliknya)
 export const getOrders = async (req, res) => {
   try {
+    // Order pending "Sekarang" yang tidak diambil siapa pun otomatis kedaluwarsa
+    try {
+      const cutoff = new Date(
+        Date.now() - PENDING_EXPIRE_MINUTES * 60 * 1000
+      ).toISOString();
+      await supabase
+        .from('orders')
+        .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+        .eq('status', 'pending')
+        .lt('created_at', cutoff)
+        .or('waktu_berangkat.is.null,waktu_berangkat.neq.jadwal');
+    } catch {
+      // Kegagalan housekeeping tidak boleh menggagalkan daftar order
+    }
+
     let query = supabase
       .from('orders')
       .select(ORDER_SELECT_QUERY)
@@ -212,7 +278,7 @@ export const getOrders = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      data,
+      data: (data || []).map((order) => hideCustomerContact(order, req.user)),
     });
   } catch (error) {
     return res.status(500).json({
@@ -235,8 +301,38 @@ export const acceptOrder = async (req, res) => {
 
     const { id } = req.params;
 
-    // Update bersyarat: hanya berhasil bila order MASIH pending & belum punya driver.
-    // Ini mencegah race condition ketika dua driver menekan "Ambil" bersamaan.
+    const { data: order, error: findError } = await supabase
+      .from('orders')
+      .select('id, status, driver_id, jenis_layanan, jenis_kendaraan, jumlah_penumpang')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (findError) throw findError;
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Pesanan tidak ditemukan.',
+      });
+    }
+
+    if (order.status !== 'pending' || order.driver_id) {
+      return res.status(409).json({
+        success: false,
+        message: 'Pesanan ini sudah diambil oleh driver lain atau tidak lagi tersedia.',
+      });
+    }
+
+    // Validasi: online, kendaraan lengkap & cocok, kapasitas cukup, tidak ada trip aktif
+    const eligibility = await checkDriverEligibility(req.user.id, order);
+    if (!eligibility.ok) {
+      return res.status(eligibility.status).json({
+        success: false,
+        message: eligibility.message,
+      });
+    }
+
+    // Update bersyarat untuk mencegah race condition antar driver
     const { data, error } = await supabase
       .from('orders')
       .update({
@@ -302,7 +398,6 @@ export const updateOrderStatus = async (req, res) => {
       });
     }
 
-    // Alur status yang sah (status akhir tidak boleh diubah lagi)
     const ALLOWED_TRANSITIONS = {
       accepted: ['on_progress', 'cancelled'],
       on_progress: ['completed', 'cancelled'],
@@ -316,9 +411,11 @@ export const updateOrderStatus = async (req, res) => {
       });
     }
 
-    // Validasi hak akses berdasarkan role
     if (status === 'cancelled') {
-      const isOwnerCustomer = order.customer_id === req.user.id && order.status === 'pending';
+      // Pemesan boleh membatalkan selama belum mulai diantar (pending / accepted)
+      const isOwnerCustomer =
+        order.customer_id === req.user.id &&
+        ['pending', 'accepted'].includes(order.status);
       const isAssignedDriver = order.driver_id === req.user.id;
 
       if (!isOwnerCustomer && !isAssignedDriver) {
@@ -328,14 +425,12 @@ export const updateOrderStatus = async (req, res) => {
         });
       }
     } else if (order.driver_id !== req.user.id) {
-      // on_progress & completed hanya boleh dilakukan driver yang mengambil order
       return res.status(403).json({
         success: false,
         message: 'Anda bukan driver yang bertugas untuk pesanan ini.',
       });
     }
 
-    // Update bersyarat: status harus masih sama seperti saat dibaca di atas
     const { data, error } = await supabase
       .from('orders')
       .update({
@@ -420,4 +515,3 @@ export const deleteOrder = async (req, res) => {
     });
   }
 };
-

@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import Card from '../../components/Card';
 import Button from '../../components/Button';
 import Input from '../../components/Input';
@@ -15,8 +15,9 @@ function formatRibuan(digitsOrNum) {
 export default function DriverNego() {
   const location = useLocation();
   const navigate = useNavigate();
+  const { id } = useParams();
 
-  const order = location.state?.order || null;
+  const [order, setOrder] = useState(() => location.state?.order || null);
   const baseOffer = Number(order?.ongkir) || 15000;
 
   const [offerDigits, setOfferDigits] = useState(String(baseOffer + 3000));
@@ -24,6 +25,31 @@ export default function DriverNego() {
   const [submitting, setSubmitting] = useState(false);
   const [sentSuccess, setSentSuccess] = useState(false);
   const [error, setError] = useState('');
+
+  // Jika halaman di-refresh (state hilang), ambil ulang order dari server
+  useEffect(() => {
+    if (order?.id || !id) return;
+    let isMounted = true;
+
+    const loadOrder = async () => {
+      try {
+        const res = await api.get('/orders');
+        const list = Array.isArray(res.data?.data) ? res.data.data : [];
+        const found = list.find((item) => String(item.id) === String(id));
+        if (isMounted && found) {
+          setOrder(found);
+          setOfferDigits(String((Number(found.ongkir) || 15000) + 3000));
+        }
+      } catch {
+        // Abaikan gangguan jaringan sementara
+      }
+    };
+
+    loadOrder();
+    return () => {
+      isMounted = false;
+    };
+  }, [id, order?.id]);
 
   const numericOffer = Number(offerDigits) || 0;
   const backUrl = order?.id ? `/driver/request/${order.id}` : '/driver';
@@ -166,7 +192,7 @@ export default function DriverNego() {
           </div>
 
           <div style={{ color: '#475569', fontSize: '12.5px' }}>
-            {order?.titik_jemput || 'Titik jemput'} â†’{' '}
+            {order?.titik_jemput || 'Titik jemput'} →{' '}
             {order?.titik_antar || 'Titik antar'}
           </div>
         </Card>
@@ -357,4 +383,3 @@ export default function DriverNego() {
     </form>
   );
 }
-

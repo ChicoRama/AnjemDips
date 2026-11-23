@@ -47,6 +47,7 @@ export default function DriverBeranda() {
 
   const vehicle = getDriverVehicleProfile(user);
   const vehicleLabel = vehicle.jenis_kendaraan === 'mobil' ? 'Mobil' : 'Motor';
+  const platLabel = vehicle.plat_nomor || 'plat belum diisi';
 
   const fetchOrders = useCallback(async () => {
     try {
@@ -294,7 +295,7 @@ export default function DriverBeranda() {
                   Siap menerima order
                 </div>
                 <div style={{ fontSize: '12px', color: '#0B5F59' }}>
-                  {vehicleLabel} · {vehicle.plat_nomor}
+                  {vehicleLabel} · {platLabel}
                   {vehicle.jenis_kendaraan === 'mobil'
                     ? ` · Maks ${vehicle.kapasitas_penumpang} org`
                     : ''}
@@ -455,7 +456,7 @@ export default function DriverBeranda() {
             Request masuk ({isOnline ? pendingOrders.length : 0})
           </div>
           <span style={{ fontSize: '11.5px', color: '#5B6678' }}>
-            {vehicleLabel} · {vehicle.plat_nomor}
+            {vehicleLabel} · {platLabel}
           </span>
         </div>
 
@@ -676,4 +677,3 @@ export default function DriverBeranda() {
     </div>
   );
 }
-

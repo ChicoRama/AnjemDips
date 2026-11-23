@@ -54,6 +54,21 @@ export const register = async (req, res) => {
       });
     }
 
+    const cleanNimInput = nim ? nim.trim() : '';
+    if (cleanNimInput && !/^\d{8,20}$/.test(cleanNimInput)) {
+      return res.status(400).json({
+        success: false,
+        message: 'NIM harus berupa angka 8–20 digit.',
+      });
+    }
+
+    if (!/^(\+?62|0)8\d{7,12}$/.test(no_wa.trim())) {
+      return res.status(400).json({
+        success: false,
+        message: 'Format nomor WhatsApp tidak valid (contoh: 081234567890).',
+      });
+    }
+
     if (!EMAIL_REGEX.test(email.trim())) {
       return res.status(400).json({
         success: false,
@@ -114,6 +129,11 @@ export const register = async (req, res) => {
         }
         cleanKapasitas = parsedKapasitas;
       }
+
+      // Motor selalu berkapasitas 1 (konsisten dengan updateDriverVehicle)
+      if (cleanJenisKendaraan === 'motor') {
+        cleanKapasitas = 1;
+      }
     }
 
     const { data: existingUser, error: checkError } = await supabase
@@ -127,7 +147,7 @@ export const register = async (req, res) => {
     if (existingUser) {
       return res.status(409).json({
         success: false,
-        message: 'Email sudah terdaftar. Silakan gunakan email lain atau login.',
+        message: 'NIM sudah terdaftar. Silakan login.',
       });
     }
 
@@ -138,7 +158,7 @@ export const register = async (req, res) => {
       .insert([
         {
           nama: nama.trim(),
-          nim: nim ? nim.trim() : null,
+          nim: cleanNimInput || null,
           email: normalizedEmail,
           password: hashedPassword,
           no_wa: no_wa.trim(),
@@ -153,11 +173,11 @@ export const register = async (req, res) => {
       .single();
 
     if (insertError) {
-      // 23505 = unique_violation (dua registrasi bersamaan dengan email sama)
+      // 23505 = unique_violation (dua registrasi bersamaan dengan NIM sama)
       if (insertError.code === '23505') {
         return res.status(409).json({
           success: false,
-          message: 'Email atau NIM sudah terdaftar. Silakan login.',
+          message: 'NIM sudah terdaftar. Silakan login.',
         });
       }
       throw insertError;
@@ -341,4 +361,3 @@ export const deleteMe = async (req, res) => {
     });
   }
 };
-

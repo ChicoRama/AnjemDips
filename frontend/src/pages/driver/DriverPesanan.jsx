@@ -274,9 +274,7 @@ export default function DriverPesanan() {
                   </div>
 
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 800 }}>
-                      {customerName}
-                    </div>
+                    <div style={{ fontWeight: 800 }}>{customerName}</div>
                     <div style={{ color: '#5B6678', fontSize: '12px' }}>
                       {isJastip
                         ? `JasTip · ${order.nama_barang || 'Titip barang'}`
@@ -525,7 +523,15 @@ export default function DriverPesanan() {
                   <button
                     type="button"
                     disabled={updatingId === order.id}
-                    onClick={() => handleUpdateStatus(order.id, 'cancelled')}
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          'Yakin batalkan pesanan ini? Pemesan akan diberi tahu.'
+                        )
+                      ) {
+                        handleUpdateStatus(order.id, 'cancelled');
+                      }
+                    }}
                     style={{
                       flex: 1,
                       height: '40px',
@@ -553,4 +559,3 @@ export default function DriverPesanan() {
     </div>
   );
 }
-

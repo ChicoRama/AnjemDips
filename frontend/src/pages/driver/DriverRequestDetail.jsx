@@ -22,6 +22,8 @@ export default function DriverRequestDetail() {
   const [loading, setLoading] = useState(!location.state?.order);
   const [accepting, setAccepting] = useState(false);
   const [error, setError] = useState('');
+  const [customerOffer, setCustomerOffer] = useState(null);
+  const [acceptingOffer, setAcceptingOffer] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -46,6 +48,37 @@ export default function DriverRequestDetail() {
     loadOrder();
     return () => {
       isMounted = false;
+    };
+  }, [id]);
+
+  // Pantau tawaran balik dari pemesan
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadOffers = async () => {
+      try {
+        const res = await api.get(`/orders/${id}/offers`);
+        const list = Array.isArray(res.data?.data) ? res.data.data : [];
+        const latest = list[0];
+        if (isMounted) {
+          setCustomerOffer(
+            latest &&
+              latest.offered_by === 'customer' &&
+              latest.status === 'pending'
+              ? latest
+              : null
+          );
+        }
+      } catch {
+        // Abaikan gangguan jaringan sementara
+      }
+    };
+
+    loadOffers();
+    const interval = setInterval(loadOffers, 5000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
     };
   }, [id]);
 
@@ -83,6 +116,26 @@ export default function DriverRequestDetail() {
       );
     } finally {
       setAccepting(false);
+    }
+  };
+
+  const handleAcceptCustomerOffer = async () => {
+    if (!order?.id || !customerOffer) return;
+    setError('');
+    setAcceptingOffer(true);
+    try {
+      const res = await api.patch(
+        `/orders/${order.id}/offers/${customerOffer.id}/accept`
+      );
+      navigate('/driver/pesanan', {
+        state: { order: res.data?.data || order },
+      });
+    } catch (err) {
+      setError(
+        err.response?.data?.message || 'Gagal menyetujui tawaran pemesan.'
+      );
+    } finally {
+      setAcceptingOffer(false);
     }
   };
 
@@ -469,19 +522,52 @@ export default function DriverRequestDetail() {
             flex: 'none',
           }}
         >
+          {customerOffer && (
+            <Card
+              variant="soft"
+              style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}
+            >
+              <div style={{ fontWeight: 800, color: '#0B4F4A' }}>
+                Pemesan menawar balik Rp{' '}
+                {formatRibuan(customerOffer.offered_price)}
+              </div>
+              {customerOffer.adjusted_passengers ? (
+                <div style={{ fontSize: '12px', color: '#0B5F59' }}>
+                  Penumpang disesuaikan menjadi{' '}
+                  {customerOffer.adjusted_passengers} orang.
+                </div>
+              ) : null}
+              <Button
+                type="button"
+                variant="primary"
+                height={44}
+                disabled={acceptingOffer}
+                onClick={handleAcceptCustomerOffer}
+              >
+                {acceptingOffer
+                  ? 'Menyetujui...'
+                  : `Setuju Rp ${formatRibuan(customerOffer.offered_price)}`}
+              </Button>
+            </Card>
+          )}
+
           <Button
             type="button"
             variant="primary"
-            disabled={accepting}
+            disabled={accepting || isOverCapacity || !user?.is_online}
             onClick={handleAcceptOrder}
           >
             {accepting
               ? 'Menerima pesanan...'
+              : isOverCapacity
+              ? 'Melebihi kapasitas, silakan tawar'
+              : !user?.is_online
+              ? 'Aktifkan status ON dulu'
               : `Terima Rp ${formatRibuan(ongkir)}`}
           </Button>
 
           <Button
-            to="/driver/nego"
+            to={`/driver/nego/${order.id}`}
             state={{ order }}
             variant="outline"
           >
@@ -492,4 +578,3 @@ export default function DriverRequestDetail() {
     </div>
   );
 }
-

@@ -70,6 +70,8 @@ export default function CustomerLacak() {
     order?.status
   );
   const isCompleted = order?.status === 'completed';
+  const isCancelled = order?.status === 'cancelled';
+  const canCancel = ['pending', 'accepted'].includes(order?.status);
 
   const statusSubtitle = isCompleted
     ? 'Pesanan telah selesai'
@@ -78,12 +80,12 @@ export default function CustomerLacak() {
     : 'Driver sedang menjemput';
 
   const etaText = isCompleted
-    ? 'Sudah tiba'
+    ? 'Selesai'
     : isOnWay
-    ? 'Tiba ± 6 menit'
-    : 'Tiba ± 4 menit';
+    ? 'Dalam perjalanan'
+    : 'Driver menuju lokasimu';
 
-  const distanceText = isCompleted ? '0 km' : isOnWay ? '2,4 km' : '1,2 km';
+  const distanceText = isCompleted ? 'Tiba' : isOnWay ? 'Mengantar' : 'Menjemput';
   const activeStepCount = isCompleted ? 4 : isOnWay ? 3 : 2;
 
   const driverName = order?.driver?.nama || 'Driver';
@@ -91,11 +93,11 @@ export default function CustomerLacak() {
   const isMotor =
     (order?.driver?.jenis_kendaraan || order?.jenis_kendaraan) === 'motor';
   const vehicleLabel = isMotor ? 'Motor' : 'Mobil';
-  const platNomor = order?.driver?.plat_nomor || 'H 1234 AB';
+  const platNomor = order?.driver?.plat_nomor || '-';
 
   const isJastip = order?.jenis_layanan === 'jastip';
   const hargaBarang = Number(order?.perkiraan_harga_barang) || 0;
-  const ongkir = Number(order?.ongkir) || 18000;
+  const ongkir = Number(order?.ongkir) || 0;
   const agreedPrice = isJastip ? hargaBarang + ongkir : ongkir;
 
   const driverWa = formatWaUrl(
@@ -125,6 +127,51 @@ export default function CustomerLacak() {
       setCancelling(false);
     }
   };
+
+  // Layar khusus bila pesanan dibatalkan (mis. oleh driver)
+  if (isCancelled) {
+    return (
+      <div
+        className="pwa-shell"
+        style={{
+          minHeight: '844px',
+          boxSizing: 'border-box',
+          background: '#F5F6F8',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: '12px',
+          padding: '20px',
+          textAlign: 'center',
+        }}
+      >
+        <div style={{ fontWeight: 800, fontSize: '18px' }}>
+          Pesanan dibatalkan
+        </div>
+        <div style={{ color: '#5B6678' }}>
+          Pesanan ini telah dibatalkan. Kamu bisa membuat pesanan baru.
+        </div>
+        <Link
+          to="/customer"
+          style={{
+            marginTop: '8px',
+            height: '44px',
+            padding: '0 24px',
+            borderRadius: '12px',
+            background: '#0F766E',
+            color: '#fff',
+            fontWeight: 700,
+            display: 'inline-flex',
+            alignItems: 'center',
+            textDecoration: 'none',
+          }}
+        >
+          Kembali ke beranda
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -266,7 +313,7 @@ export default function CustomerLacak() {
         Diperbarui {secondsAgo} detik lalu
       </div>
 
-      {/* Bottom Sheet Info Driver & Estimasi */}
+      {/* Bottom Sheet Info Driver & Status */}
       <div
         style={{
           position: 'absolute',
@@ -311,7 +358,7 @@ export default function CustomerLacak() {
             </div>
           </div>
           <div style={{ textAlign: 'right' }}>
-            <div style={{ color: '#5B6678', fontSize: '12px' }}>Jarak</div>
+            <div style={{ color: '#5B6678', fontSize: '12px' }}>Tahap</div>
             <div style={{ fontWeight: 800, fontSize: '15px' }}>
               {distanceText}
             </div>
@@ -473,34 +520,56 @@ export default function CustomerLacak() {
             </Link>
           )}
 
-          <button
-            type="button"
-            disabled={cancelling}
-            onClick={handleCancelOrder}
-            style={{
-              height: '46px',
-              borderRadius: '14px',
-              border: 0,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '8px',
-              font: "700 13px 'Plus Jakarta Sans',system-ui,sans-serif",
-              textDecoration: 'none',
-              boxSizing: 'border-box',
-              flex: 1,
-              background: '#fff',
-              color: '#B91C1C',
-              boxShadow: 'inset 0 0 0 1.5px #F3C4C4',
-              cursor: cancelling ? 'not-allowed' : 'pointer',
-              opacity: cancelling ? 0.6 : 1,
-            }}
-          >
-            {cancelling ? 'Membatalkan...' : 'Batalkan'}
-          </button>
+          {canCancel && (
+            <button
+              type="button"
+              disabled={cancelling}
+              onClick={handleCancelOrder}
+              style={{
+                height: '46px',
+                borderRadius: '14px',
+                border: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                font: "700 13px 'Plus Jakarta Sans',system-ui,sans-serif",
+                boxSizing: 'border-box',
+                flex: 1,
+                background: '#fff',
+                color: '#B91C1C',
+                boxShadow: 'inset 0 0 0 1.5px #F3C4C4',
+                cursor: cancelling ? 'not-allowed' : 'pointer',
+                opacity: cancelling ? 0.6 : 1,
+              }}
+            >
+              {cancelling ? 'Membatalkan...' : 'Batalkan'}
+            </button>
+          )}
+
+          {isCompleted && (
+            <Link
+              to="/customer/history"
+              style={{
+                height: '46px',
+                borderRadius: '14px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontWeight: 700,
+                fontSize: '13px',
+                textDecoration: 'none',
+                boxSizing: 'border-box',
+                flex: 1,
+                background: '#E6F4F2',
+                color: '#0B5F59',
+              }}
+            >
+              Lihat riwayat
+            </Link>
+          )}
         </div>
       </div>
     </div>
   );
 }
-

@@ -15,6 +15,7 @@ export default function CustomerMencari() {
   const [order, setOrder] = useState(() => location.state?.order || null);
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState('');
+  const [offerCount, setOfferCount] = useState(0);
 
   // Ambil order pending terbaru jika halaman dibuka langsung / di-refresh,
   // sekaligus pantau berkala jika driver sudah menerima pesanan
@@ -33,6 +34,24 @@ export default function CustomerMencari() {
         if (!isMounted || !target) return;
 
         setOrder(target);
+
+        if (target.status === 'pending') {
+          try {
+            const offersRes = await api.get(`/orders/${target.id}/offers`);
+            const offerList = Array.isArray(offersRes.data?.data)
+              ? offersRes.data.data
+              : [];
+            if (isMounted) {
+              setOfferCount(
+                offerList.filter(
+                  (o) => o.offered_by === 'driver' && o.status === 'pending'
+                ).length
+              );
+            }
+          } catch {
+            // Abaikan error jaringan sementara saat memuat tawaran
+          }
+        }
 
         if (
           ['accepted', 'on_progress', 'on_the_way', 'in_progress'].includes(
@@ -63,7 +82,7 @@ export default function CustomerMencari() {
 
   const vehicleLabel =
     order?.jenis_kendaraan === 'motor' ? 'Motor' : 'Mobil';
-  const penumpangCount = order?.jumlah_penumpang || 3;
+  const penumpangCount = order?.jumlah_penumpang || 1;
   const waktuLabel =
     order?.waktu_berangkat === 'jadwal' ? 'Jadwal' : 'Sekarang';
 
@@ -295,7 +314,7 @@ export default function CustomerMencari() {
               }}
             />
             <span style={{ fontWeight: 600 }}>
-              {order?.titik_jemput || 'Lokasi saya saat ini'}
+              {order?.titik_jemput || 'Titik jemput'}
             </span>
           </div>
 
@@ -371,13 +390,15 @@ export default function CustomerMencari() {
             to="/customer/tawaran"
             state={order ? { order } : undefined}
             variant="primary"
+            disabled={offerCount === 0}
             style={{ flex: 1 }}
           >
-            Lihat tawaran
+            {offerCount > 0
+              ? `Lihat tawaran (${offerCount})`
+              : 'Belum ada tawaran'}
           </Button>
         </div>
       </div>
     </div>
   );
 }
-

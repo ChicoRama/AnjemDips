@@ -15,8 +15,9 @@ export default function CustomerJastip() {
 
   const [namaBarang, setNamaBarang] = useState('');
   const [titikJemput, setTitikJemput] = useState('');
-  const [titikAntar, setTitikAntar] = useState('Lokasi saya saat ini');
+  const [titikAntar, setTitikAntar] = useState('');
   const [waktuBerangkat, setWaktuBerangkat] = useState('sekarang'); // 'sekarang' | 'jadwal'
+  const [jadwalAt, setJadwalAt] = useState('');
   const [hargaBarangDigits, setHargaBarangDigits] = useState('30000');
   const [ongkirDigits, setOngkirDigits] = useState('8000');
   const [catatan, setCatatan] = useState('');
@@ -58,6 +59,22 @@ export default function CustomerJastip() {
       return;
     }
 
+    let jadwalIso = null;
+    if (waktuBerangkat === 'jadwal') {
+      const picked = new Date(jadwalAt);
+      if (
+        !jadwalAt ||
+        Number.isNaN(picked.getTime()) ||
+        picked.getTime() < Date.now()
+      ) {
+        setError(
+          'Pilih tanggal dan jam yang valid (tidak di masa lalu).'
+        );
+        return;
+      }
+      jadwalIso = picked.toISOString();
+    }
+
     setSubmitting(true);
     try {
       const payload = {
@@ -66,8 +83,7 @@ export default function CustomerJastip() {
         titik_jemput: cleanBeli,
         titik_antar: cleanAntar,
         waktu_berangkat: waktuBerangkat,
-        jadwal_at:
-          waktuBerangkat === 'jadwal' ? new Date().toISOString() : null,
+        jadwal_at: jadwalIso,
         perkiraan_harga_barang: numericHargaBarang,
         ongkir: numericOngkir,
         catatan: catatan.trim(),
@@ -194,6 +210,7 @@ export default function CustomerJastip() {
 
           <Input
             label="Antar ke"
+            placeholder="Antar ke mana? (contoh: Gedung Teknik Komputer)"
             value={titikAntar}
             onChange={(e) => {
               setTitikAntar(e.target.value);
@@ -288,6 +305,18 @@ export default function CustomerJastip() {
               </div>
             </div>
           </div>
+
+          {waktuBerangkat === 'jadwal' && (
+            <Input
+              label="Tanggal & jam"
+              type="datetime-local"
+              value={jadwalAt}
+              onChange={(e) => {
+                setJadwalAt(e.target.value);
+                if (error) setError('');
+              }}
+            />
+          )}
         </Card>
 
         {/* Kartu Harga Barang & Upah Driver */}
@@ -447,4 +476,3 @@ export default function CustomerJastip() {
     </form>
   );
 }
-

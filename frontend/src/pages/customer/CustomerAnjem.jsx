@@ -15,10 +15,11 @@ const MAX_PENUMPANG = { motor: 1, mobil: 6 };
 export default function CustomerAnjem() {
   const navigate = useNavigate();
 
-  const [titikJemput, setTitikJemput] = useState('Lokasi saya saat ini');
+  const [titikJemput, setTitikJemput] = useState('');
   const [titikAntar, setTitikAntar] = useState('');
   const [jenisKendaraan, setJenisKendaraan] = useState('mobil'); // 'motor' | 'mobil'
   const [waktuBerangkat, setWaktuBerangkat] = useState('sekarang'); // 'sekarang' | 'jadwal'
+  const [jadwalAt, setJadwalAt] = useState('');
   const [jumlahPenumpang, setJumlahPenumpang] = useState(3);
   const [ongkirDigits, setOngkirDigits] = useState('15000');
 
@@ -59,6 +60,22 @@ export default function CustomerAnjem() {
       return;
     }
 
+    let jadwalIso = null;
+    if (waktuBerangkat === 'jadwal') {
+      const picked = new Date(jadwalAt);
+      if (
+        !jadwalAt ||
+        Number.isNaN(picked.getTime()) ||
+        picked.getTime() < Date.now()
+      ) {
+        setError(
+          'Pilih tanggal dan jam berangkat yang valid (tidak di masa lalu).'
+        );
+        return;
+      }
+      jadwalIso = picked.toISOString();
+    }
+
     setSubmitting(true);
     try {
       const payload = {
@@ -69,8 +86,7 @@ export default function CustomerAnjem() {
         jenis_kendaraan: jenisKendaraan,
         jumlah_penumpang: jumlahPenumpang,
         waktu_berangkat: waktuBerangkat,
-        jadwal_at:
-          waktuBerangkat === 'jadwal' ? new Date().toISOString() : null,
+        jadwal_at: jadwalIso,
       };
 
       const res = await api.post('/orders', payload);
@@ -220,6 +236,7 @@ export default function CustomerAnjem() {
                 label="Titik jemput"
                 hideLabel
                 aria-label="Titik jemput"
+                placeholder="Jemput di mana? (contoh: Kos Sirojudin)"
                 value={titikJemput}
                 onChange={(e) => {
                   setTitikJemput(e.target.value);
@@ -274,20 +291,6 @@ export default function CustomerAnjem() {
               <circle cx="52" cy="62" r="7" fill="#0F766E" />
               <circle cx="268" cy="62" r="7" fill="#F59E0B" />
             </svg>
-            <span
-              style={{
-                position: 'absolute',
-                right: '8px',
-                bottom: '8px',
-                background: '#fff',
-                borderRadius: '99px',
-                padding: '3px 9px',
-                fontSize: '11px',
-                fontWeight: 700,
-              }}
-            >
-              ± 4,2 km
-            </span>
           </div>
         </Card>
 
@@ -581,6 +584,18 @@ export default function CustomerAnjem() {
             </div>
           </div>
 
+          {waktuBerangkat === 'jadwal' && (
+            <Input
+              label="Tanggal & jam berangkat"
+              type="datetime-local"
+              value={jadwalAt}
+              onChange={(e) => {
+                setJadwalAt(e.target.value);
+                if (error) setError('');
+              }}
+            />
+          )}
+
           <div
             style={{
               color: '#5B6678',
@@ -588,8 +603,8 @@ export default function CustomerAnjem() {
               marginTop: '-4px',
             }}
           >
-            Pilih “Jadwal” untuk berangkat di waktu mendatang. Jam otomatis
-            terisi saat pesanan dibuat.
+            Pilih “Jadwal” untuk berangkat di waktu mendatang, lalu tentukan
+            tanggal dan jamnya.
           </div>
         </Card>
 
@@ -678,4 +693,3 @@ export default function CustomerAnjem() {
     </form>
   );
 }
-

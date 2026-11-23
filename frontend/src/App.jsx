@@ -88,14 +88,6 @@ export default function App() {
             }
           />
           <Route
-            path="/customer/tawaran-kelebihan"
-            element={
-              <ProtectedRoute allowedRole="customer">
-                <CustomerTawaran forceOverCapacity />
-              </ProtectedRoute>
-            }
-          />
-          <Route
             path="/customer/pesanan"
             element={
               <ProtectedRoute allowedRole="customer">
@@ -162,7 +154,7 @@ export default function App() {
             }
           />
           <Route
-            path="/driver/nego"
+            path="/driver/nego/:id"
             element={
               <ProtectedRoute allowedRole="driver">
                 <DriverNego />
@@ -224,4 +216,3 @@ export default function App() {
     </AuthProvider>
   );
 }
-

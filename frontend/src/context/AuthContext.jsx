@@ -13,8 +13,9 @@ export function AuthProvider({ children }) {
   // Pulihkan sesi dari token yang tersimpan saat aplikasi pertama kali dibuka
   useEffect(() => {
     let cancelled = false;
+    let retryTimer = null;
 
-    const restoreSession = async () => {
+    const restoreSession = async (attempt = 0) => {
       const token = localStorage.getItem(TOKEN_KEY);
       if (!token) {
         setLoading(false);
@@ -23,22 +24,40 @@ export function AuthProvider({ children }) {
 
       try {
         const res = await api.get('/auth/me');
-        if (!cancelled) setUser(res.data.user);
-      } catch (err) {
-        // Hanya hapus token bila server menyatakan token tidak valid.
-        // Jika hanya gagal jaringan, token tetap disimpan agar bisa dicoba lagi.
-        if (err.response?.status === 401 || err.response?.status === 404) {
-          localStorage.removeItem(TOKEN_KEY);
+        if (!cancelled) {
+          setUser(res.data.user);
+          setLoading(false);
         }
-        if (!cancelled) setUser(null);
-      } finally {
-        if (!cancelled) setLoading(false);
+      } catch (err) {
+        const status = err.response?.status;
+
+        // Token benar-benar tidak valid -> hapus sesi
+        if (status === 401 || status === 404) {
+          localStorage.removeItem(TOKEN_KEY);
+          if (!cancelled) {
+            setUser(null);
+            setLoading(false);
+          }
+          return;
+        }
+
+        // Gangguan jaringan/server: coba lagi (maks 3x) sebelum menyerah
+        if (attempt < 3 && !cancelled) {
+          retryTimer = setTimeout(() => restoreSession(attempt + 1), 2000);
+          return;
+        }
+
+        if (!cancelled) {
+          setUser(null);
+          setLoading(false);
+        }
       }
     };
 
     restoreSession();
     return () => {
       cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
     };
   }, []);
 
