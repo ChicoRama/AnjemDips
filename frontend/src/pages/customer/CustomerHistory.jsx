@@ -4,6 +4,7 @@ import api from '../../api/axios';
 import Card from '../../components/Card';
 import Chip from '../../components/Chip';
 import BottomNav from '../../components/BottomNav';
+import { useAuth } from '../../context/AuthContext';
 
 const HISTORY_STATUSES = ['completed', 'cancelled'];
 
@@ -24,6 +25,8 @@ function formatTanggal(isoString) {
 }
 
 export default function CustomerHistory() {
+  const { user } = useAuth();
+  const cacheKey = `anjemdips:history:customer:${user?.id || 'guest'}`;
   const [orders, setOrders] = useState([]);
   const [filter, setFilter] = useState('all'); // 'all' | 'completed' | 'cancelled'
   const [loading, setLoading] = useState(true);
@@ -38,12 +41,25 @@ export default function CustomerHistory() {
         HISTORY_STATUSES.includes(item.status)
       );
       setOrders(historyList);
+      try {
+        localStorage.setItem(cacheKey, JSON.stringify(historyList));
+      } catch (storageError) {
+        console.warn('Cache riwayat tidak dapat disimpan:', storageError);
+      }
+      setError('');
     } catch {
-      setOrders([]);
+      try {
+        const cached = JSON.parse(localStorage.getItem(cacheKey) || '[]');
+        if (Array.isArray(cached)) setOrders(cached);
+        else setOrders([]);
+      } catch {
+        setOrders([]);
+      }
+      setError('Tidak ada koneksi. Menampilkan riwayat terakhir yang tersimpan.');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [cacheKey]);
 
   useEffect(() => {
     fetchHistory();
@@ -55,7 +71,11 @@ export default function CustomerHistory() {
     setDeletingId(orderId);
     try {
       await api.delete(`/orders/${orderId}`);
-      setOrders((prev) => prev.filter((item) => item.id !== orderId));
+      setOrders((prev) => {
+        const next = prev.filter((item) => item.id !== orderId);
+        try { localStorage.setItem(cacheKey, JSON.stringify(next)); } catch {}
+        return next;
+      });
     } catch (err) {
       setError(
         err.response?.data?.message || 'Gagal menghapus riwayat pesanan.'
@@ -290,11 +310,11 @@ export default function CustomerHistory() {
 
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: 800 }}>
-                      {isJastip ? 'JasTip' : `AnJem · ${vehicleLabel}`}
+                      {isJastip ? 'JasTip' : `AnJem Â· ${vehicleLabel}`}
                     </div>
                     <div style={{ color: '#5B6678', fontSize: '11.5px' }}>
                       {formatTanggal(order.created_at)}
-                      {order.driver?.nama ? ` · ${order.driver.nama}` : ''}
+                      {order.driver?.nama ? ` Â· ${order.driver.nama}` : ''}
                     </div>
                   </div>
 
@@ -439,4 +459,3 @@ export default function CustomerHistory() {
     </div>
   );
 }
-

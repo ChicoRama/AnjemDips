@@ -25,6 +25,7 @@ function formatTanggal(isoString) {
 
 export default function DriverHistory() {
   const { user } = useAuth();
+  const cacheKey = `anjemdips:history:driver:${user?.id || 'guest'}`;
 
   const [orders, setOrders] = useState([]);
   const [filter, setFilter] = useState('all'); // 'all' | 'completed' | 'cancelled'
@@ -40,12 +41,23 @@ export default function DriverHistory() {
           HISTORY_STATUSES.includes(item.status)
       );
       setOrders(driverHistory);
+      try {
+        localStorage.setItem(cacheKey, JSON.stringify(driverHistory));
+      } catch (storageError) {
+        console.warn('Cache riwayat tidak dapat disimpan:', storageError);
+      }
     } catch {
-      setOrders([]);
+      try {
+        const cached = JSON.parse(localStorage.getItem(cacheKey) || '[]');
+        if (Array.isArray(cached)) setOrders(cached);
+        else setOrders([]);
+      } catch {
+        setOrders([]);
+      }
     } finally {
       setLoading(false);
     }
-  }, [user?.id]);
+  }, [user?.id, cacheKey]);
 
   useEffect(() => {
     fetchHistory();
@@ -219,7 +231,7 @@ export default function DriverHistory() {
                 >
                   <div>
                     <div style={{ fontWeight: 800 }}>
-                      {isJastip ? 'JasTip' : 'AnJem'} ·{' '}
+                      {isJastip ? 'JasTip' : 'AnJem'} Â·{' '}
                       {order.customer?.nama || 'Mahasiswa'}
                     </div>
                     <div style={{ color: '#5B6678', fontSize: '11.5px' }}>
@@ -313,4 +325,3 @@ export default function DriverHistory() {
     </div>
   );
 }
-

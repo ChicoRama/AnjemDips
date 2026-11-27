@@ -172,16 +172,19 @@ export default function BottomNav({ role = 'customer' }) {
     <nav
       aria-label="Navigasi utama"
       style={{
-        position: 'sticky',
-        left: 0,
-        right: 0,
+        position: 'fixed',
+        left: '50%',
+        right: 'auto',
         bottom: 0,
+        transform: 'translateX(-50%)',
+        width: '100%',
+        maxWidth: 'var(--screen-width)',
         height: '68px',
         background: '#fff',
         boxShadow: '0 -1px 0 #E8EBEF',
         display: 'flex',
-        padding: '0 8px 6px',
-        marginTop: 'auto',
+        padding: '0 8px calc(6px + env(safe-area-inset-bottom))',
+        marginTop: 0,
         zIndex: 20,
         flexShrink: 0,
       }}
@@ -211,4 +214,3 @@ export default function BottomNav({ role = 'customer' }) {
     </nav>
   );
 }
-

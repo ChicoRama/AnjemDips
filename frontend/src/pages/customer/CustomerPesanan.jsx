@@ -42,8 +42,9 @@ export default function CustomerPesanan() {
         ACTIVE_STATUSES.includes(item.status)
       );
       setOrders(activeList);
+      setError('');
     } catch {
-      setOrders([]);
+      setError('Koneksi terputus. Menampilkan data pesanan terakhir yang berhasil dimuat.');
     } finally {
       setLoading(false);
     }
@@ -272,7 +273,7 @@ export default function CustomerPesanan() {
 
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontWeight: 800 }}>
-                        {isJastip ? 'JasTip' : `AnJem · ${vehicleLabel}`}
+                        {isJastip ? 'JasTip' : `AnJem Â· ${vehicleLabel}`}
                       </div>
                       <div
                         style={{
@@ -285,8 +286,8 @@ export default function CustomerPesanan() {
                       >
                         {isJastip
                           ? order.nama_barang ||
-                            `${order.titik_jemput} → ${order.titik_antar}`
-                          : `${order.titik_jemput} → ${order.titik_antar}`}
+                            `${order.titik_jemput} â†’ ${order.titik_antar}`
+                          : `${order.titik_jemput} â†’ ${order.titik_antar}`}
                       </div>
                     </div>
 
@@ -305,7 +306,7 @@ export default function CustomerPesanan() {
                         ? hargaBarang > 0
                           ? `Barang Rp ${formatRibuan(hargaBarang)} + upah Rp ${formatRibuan(ongkir)}`
                           : `Upah Rp ${formatRibuan(ongkir)}`
-                        : `${order.jumlah_penumpang || 1} penumpang · ${waktuLabel(order)}`}
+                        : `${order.jumlah_penumpang || 1} penumpang Â· ${waktuLabel(order)}`}
                     </span>
                     <span style={{ fontWeight: 800 }}>
                       Rp {formatRibuan(totalHarga)}
@@ -452,14 +453,14 @@ export default function CustomerPesanan() {
 
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: 800 }}>
-                      {isJastip ? 'JasTip' : `AnJem · ${vehicleLabel}`}
+                      {isJastip ? 'JasTip' : `AnJem Â· ${vehicleLabel}`}
                     </div>
                     <div style={{ color: '#5B6678', fontSize: '12px' }}>
                       {isJastip && order.nama_barang
                         ? order.nama_barang
                         : order.waktu_berangkat === 'jadwal'
                         ? waktuLabel(order)
-                        : 'Hari ini · Berangkat sekarang'}
+                        : 'Hari ini Â· Berangkat sekarang'}
                     </div>
                   </div>
 
@@ -602,7 +603,7 @@ export default function CustomerPesanan() {
                 >
                   <span style={{ color: '#5B6678' }}>
                     {driverName}
-                    {driverPlat ? ` · ${driverPlat}` : ''}
+                    {driverPlat ? ` Â· ${driverPlat}` : ''}
                   </span>
                   <span style={{ fontWeight: 800 }}>
                     Rp {formatRibuan(totalHarga)}
@@ -690,5 +691,3 @@ export default function CustomerPesanan() {
     </div>
   );
 }
-
-

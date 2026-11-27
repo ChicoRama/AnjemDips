@@ -354,50 +354,34 @@ export const acceptOrderOffer = async (req, res) => {
       });
     }
 
-    const now = new Date().toISOString();
+    // Proses penerimaan dijalankan dalam satu transaksi PostgreSQL melalui RPC.
+    // RPC mengunci baris order dan memperbarui order + seluruh status offer secara atomik.
+    const { data: acceptance, error: acceptanceError } = await supabase.rpc(
+      'accept_order_offer_atomic',
+      {
+        p_order_id: id,
+        p_offer_id: offerId,
+        p_actor_id: req.user.id,
+      }
+    );
 
-    // 1) Kunci order lebih dulu dengan update bersyarat (hanya jika masih pending).
-    //    Bila gagal/kalah balapan, tawaran tidak ikut berubah.
-    const { data: updatedOrder, error: updateOrderError } = await supabase
-      .from('orders')
-      .update({
-        driver_id: offer.driver_id,
-        ongkir: offer.offered_price,
-        jumlah_penumpang: finalPassengers,
-        status: 'accepted',
-        updated_at: now,
-      })
-      .eq('id', id)
-      .eq('status', 'pending')
-      .select(ORDER_SELECT_QUERY)
-      .maybeSingle();
+    if (acceptanceError) throw acceptanceError;
 
-    if (updateOrderError) throw updateOrderError;
-
-    if (!updatedOrder) {
-      return res.status(409).json({
+    if (!acceptance?.success) {
+      return res.status(acceptance?.status || 409).json({
         success: false,
-        message: 'Pesanan ini sudah diproses atau tidak lagi tersedia.',
+        message: acceptance?.message || 'Pesanan atau tawaran sudah berubah. Muat ulang lalu coba lagi.',
       });
     }
 
-    // 2) Setujui tawaran terpilih
-    const { error: acceptError } = await supabase
-      .from('offers')
-      .update({ status: 'accepted', updated_at: now })
-      .eq('id', offerId);
+    // Ambil ulang relasi customer/driver agar bentuk respons tetap sama seperti API sebelumnya.
+    const { data: updatedOrder, error: fetchUpdatedOrderError } = await supabase
+      .from('orders')
+      .select(ORDER_SELECT_QUERY)
+      .eq('id', id)
+      .single();
 
-    if (acceptError) throw acceptError;
-
-    // 3) Tolak tawaran lain pada pesanan yang sama
-    const { error: rejectError } = await supabase
-      .from('offers')
-      .update({ status: 'rejected', updated_at: now })
-      .eq('order_id', id)
-      .neq('id', offerId)
-      .eq('status', 'pending');
-
-    if (rejectError) throw rejectError;
+    if (fetchUpdatedOrderError) throw fetchUpdatedOrderError;
 
     return res.status(200).json({
       success: true,

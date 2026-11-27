@@ -46,8 +46,9 @@ export default function DriverPesanan() {
           DRIVER_ACTIVE_STATUSES.includes(item.status)
       );
       setOrders(activeList);
+      setError('');
     } catch {
-      setOrders([]);
+      setError('Koneksi terputus. Menampilkan data pesanan terakhir yang berhasil dimuat.');
     } finally {
       setLoading(false);
     }
@@ -278,14 +279,14 @@ export default function DriverPesanan() {
                     <div style={{ fontWeight: 800 }}>{customerName}</div>
                     <div style={{ color: '#5B6678', fontSize: '12px' }}>
                       {isJastip
-                        ? `JasTip · ${order.nama_barang || 'Titip barang'}${
+                        ? `JasTip Â· ${order.nama_barang || 'Titip barang'}${
                             order.waktu_berangkat === 'jadwal'
-                              ? ` · ${waktuLabel(order)}`
+                              ? ` Â· ${waktuLabel(order)}`
                               : ''
                           }`
-                        : `AnJem · ${order.jumlah_penumpang || 1} penumpang${
+                        : `AnJem Â· ${order.jumlah_penumpang || 1} penumpang${
                             order.waktu_berangkat === 'jadwal'
-                              ? ` · ${waktuLabel(order)}`
+                              ? ` Â· ${waktuLabel(order)}`
                               : ''
                           }`}
                     </div>
@@ -457,8 +458,8 @@ export default function DriverPesanan() {
                     {updatingId === order.id
                       ? 'Memperbarui...'
                       : isJastip
-                      ? 'Barang dibeli · Mulai antar'
-                      : 'Sudah jemput · Mulai antar'}
+                      ? 'Barang dibeli Â· Mulai antar'
+                      : 'Sudah jemput Â· Mulai antar'}
                   </button>
                 ) : (
                   <button
