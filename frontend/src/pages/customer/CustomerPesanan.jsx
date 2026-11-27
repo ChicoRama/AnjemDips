@@ -42,9 +42,8 @@ export default function CustomerPesanan() {
         ACTIVE_STATUSES.includes(item.status)
       );
       setOrders(activeList);
-      setError('');
     } catch {
-      setError('Koneksi terputus. Menampilkan data pesanan terakhir yang berhasil dimuat.');
+      setOrders([]);
     } finally {
       setLoading(false);
     }
@@ -57,17 +56,19 @@ export default function CustomerPesanan() {
   }, [fetchActiveOrders]);
 
   const handleCancelOrder = async (orderId) => {
+    const confirmed = window.confirm(
+      'Yakin ingin membatalkan pesanan ini? Pembatalan akan langsung berlaku dan driver akan menerima perubahan status.'
+    );
+    if (!confirmed) return;
+
     setError('');
     setCancellingId(orderId);
     try {
-      await api.patch(`/orders/${orderId}/status`, {
-        status: 'cancelled',
-      });
+      await api.post(`/orders/${orderId}/cancel`);
       await fetchActiveOrders();
     } catch (err) {
-      setError(
-        err.response?.data?.message || 'Gagal membatalkan pesanan.'
-      );
+      setError(err.response?.data?.message || 'Gagal membatalkan pesanan.');
+      await fetchActiveOrders();
     } finally {
       setCancellingId(null);
     }
@@ -680,6 +681,27 @@ export default function CustomerPesanan() {
                     </span>
                   )}
                 </div>
+
+                {order.status === 'accepted' && (
+                  <button
+                    type="button"
+                    disabled={cancellingId === order.id}
+                    onClick={() => handleCancelOrder(order.id)}
+                    style={{
+                      height: '42px',
+                      borderRadius: '12px',
+                      border: 0,
+                      background: '#fff',
+                      color: '#B91C1C',
+                      boxShadow: 'inset 0 0 0 1.5px #F3C4C4',
+                      font: "700 13px 'Plus Jakarta Sans',system-ui,sans-serif",
+                      cursor: cancellingId === order.id ? 'not-allowed' : 'pointer',
+                      opacity: cancellingId === order.id ? 0.6 : 1,
+                    }}
+                  >
+                    {cancellingId === order.id ? 'Membatalkan...' : 'Batalkan pesanan'}
+                  </button>
+                )}
               </Card>
             );
           })

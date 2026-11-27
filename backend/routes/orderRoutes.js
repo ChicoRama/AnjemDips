@@ -4,6 +4,7 @@ import {
   getOrders,
   acceptOrder,
   updateOrderStatus,
+  cancelOrder,
   deleteOrder,
 } from '../controllers/orderController.js';
 import {
@@ -22,6 +23,7 @@ router.post('/', createOrder);
 router.get('/', getOrders);
 router.patch('/:id/accept', acceptOrder);
 router.patch('/:id/status', updateOrderStatus);
+router.post('/:id/cancel', cancelOrder);
 router.delete('/:id', deleteOrder);
 
 // Negosiasi & Tawaran Harga
@@ -31,5 +33,3 @@ router.patch('/:id/offers/:offerId/accept', acceptOrderOffer);
 router.patch('/:id/offers/:offerId/reject', rejectOrderOffer);
 
 export default router;
-
-

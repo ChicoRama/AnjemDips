@@ -1,5 +1,9 @@
 import supabase from '../config/supabase.js';
 import { checkDriverEligibility } from '../utils/driverEligibility.js';
+import {
+  CUSTOMER_CANCELLABLE_STATUSES,
+  canCustomerCancelOrder,
+} from '../utils/orderCancellation.js';
 
 const ORDER_SELECT_QUERY = `
   *,
@@ -382,6 +386,73 @@ export const acceptOrder = async (req, res) => {
   }
 };
 
+
+// POST /api/orders/:id/cancel (Customer membatalkan pesanan miliknya)
+// Pembatalan sepihak hanya diizinkan sebelum perjalanan dimulai: pending / accepted.
+export const cancelOrder = async (req, res) => {
+  try {
+    if (req.user.role !== 'customer') {
+      return res.status(403).json({
+        success: false,
+        message: 'Hanya customer pemilik pesanan yang dapat menggunakan pembatalan ini.',
+      });
+    }
+
+    const { id } = req.params;
+    const { data, error } = await supabase
+      .from('orders')
+      .update({
+        status: 'cancelled',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .eq('customer_id', req.user.id)
+      .in('status', CUSTOMER_CANCELLABLE_STATUSES)
+      .select(ORDER_SELECT_QUERY)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (!data) {
+      const { data: existingOrder, error: lookupError } = await supabase
+        .from('orders')
+        .select('id, customer_id, status')
+        .eq('id', id)
+        .maybeSingle();
+
+      if (lookupError) throw lookupError;
+      if (!existingOrder || existingOrder.customer_id !== req.user.id) {
+        return res.status(404).json({
+          success: false,
+          message: 'Pesanan tidak ditemukan.',
+        });
+      }
+
+      const canStillCancel = canCustomerCancelOrder(req.user, existingOrder);
+      return res.status(409).json({
+        success: false,
+        message: existingOrder.status === 'cancelled'
+          ? 'Pesanan ini sudah dibatalkan.'
+          : canStillCancel
+            ? 'Status pesanan berubah. Muat ulang lalu coba lagi.'
+            : 'Pesanan tidak dapat dibatalkan karena perjalanan sudah dimulai atau pesanan sudah selesai.',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Pesanan berhasil dibatalkan. Driver akan melihat perubahan status pesanan.',
+      data,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal membatalkan pesanan.',
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
+    });
+  }
+};
+
 // PATCH /api/orders/:id/status (Update status perjalanan / pembatalan)
 export const updateOrderStatus = async (req, res) => {
   try {
@@ -425,19 +496,17 @@ export const updateOrderStatus = async (req, res) => {
     }
 
     if (status === 'cancelled') {
-      // Pemesan boleh membatalkan selama belum mulai diantar (pending / accepted)
-      const isOwnerCustomer =
-        order.customer_id === req.user.id &&
-        ['pending', 'accepted'].includes(order.status);
-      const isAssignedDriver = order.driver_id === req.user.id;
+      // Pembatalan dari customer wajib melalui endpoint khusus yang mengunci customer_id.
+      const isAssignedDriver =
+        req.user.role === 'driver' && order.driver_id === req.user.id;
 
-      if (!isOwnerCustomer && !isAssignedDriver) {
+      if (!isAssignedDriver) {
         return res.status(403).json({
           success: false,
-          message: 'Pesanan tidak dapat dibatalkan pada tahap ini.',
+          message: 'Customer harus menggunakan alur pembatalan pesanan. Driver hanya dapat membatalkan pesanan yang ditugaskan kepadanya.',
         });
       }
-    } else if (order.driver_id !== req.user.id) {
+    } else if (req.user.role !== 'driver' || order.driver_id !== req.user.id) {
       return res.status(403).json({
         success: false,
         message: 'Anda bukan driver yang bertugas untuk pesanan ini.',
