@@ -1,276 +1,142 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
-import {
-  Bell, Check, CheckCheck, Clock3, Bike, PackageCheck,
-  X, Trash2, BellRing, ShoppingBag, ArrowRight,
-} from 'lucide-react';
+import { Bell, Bike, Check, CheckCheck, Clock3, PackageCheck, ShoppingBag, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../api/axios';
 
-const POLL_INTERVAL = 15000;
-const MAX_NOTIFICATIONS = 60;
-
-const statusMessages = {
-  accepted: {
-    title: 'Driver menerima pesanan',
-    message: 'Pesananmu sudah diambil driver. Bersiap untuk dijemput, ya!',
-    icon: 'driver',
-  },
-  on_the_way: {
-    title: 'Driver sedang menuju lokasi',
-    message: 'Driver sedang dalam perjalanan menuju titik jemput.',
-    icon: 'driver',
-  },
-  on_progress: {
-    title: 'Pesanan sedang diproses',
-    message: 'Pesananmu sedang dikerjakan oleh driver.',
-    icon: 'package',
-  },
-  in_progress: {
-    title: 'Pesanan sedang diantar',
-    message: 'Pesananmu sedang dalam perjalanan ke tujuan.',
-    icon: 'package',
-  },
-  completed: {
-    title: 'Pesanan selesai',
-    message: 'Pesanan berhasil diselesaikan. Terima kasih sudah menggunakan AnjemDips!',
-    icon: 'check',
-  },
-  cancelled: {
-    title: 'Pesanan dibatalkan',
-    message: 'Pesanan ini telah dibatalkan atau kedaluwarsa.',
-    icon: 'x',
-  },
+const POLL_MS = 12000;
+const MAX_ITEMS = 50;
+const statusCopy = {
+  accepted: ['Driver menerima pesanan', 'Pesananmu sudah diambil driver.', 'driver'],
+  on_progress: ['Pesanan sedang diproses', 'Pesananmu sedang dikerjakan driver.', 'package'],
+  on_the_way: ['Driver sedang menuju lokasi', 'Driver sedang dalam perjalanan.', 'driver'],
+  in_progress: ['Pesanan sedang diantar', 'Pesananmu sedang dalam perjalanan ke tujuan.', 'package'],
+  completed: ['Pesanan selesai', 'Pesanan berhasil diselesaikan. Terima kasih!', 'check'],
+  cancelled: ['Pesanan dibatalkan', 'Pesanan ini telah dibatalkan.', 'cancel'],
 };
 
-const storageKey = (userId) => `anjemdips_notifications_${userId}`;
-const snapshotKey = (userId) => `anjemdips_order_snapshot_${userId}`;
-
-function readJson(key, fallback) {
-  try {
-    const value = localStorage.getItem(key);
-    return value ? JSON.parse(value) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function makeNotification({ title, message, orderId, type, createdAt }) {
-  return {
-    id: `${type}-${orderId}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    title,
-    message,
-    orderId,
-    type,
-    createdAt: createdAt || new Date().toISOString(),
-    read: false,
-  };
-}
-
-function getOrderLabel(order) {
-  return order?.jenis_layanan === 'jastip' ? 'Jastip' : 'Anjem';
-}
-
-function getOrderDescription(order) {
-  const route = [order?.titik_jemput, order?.titik_antar].filter(Boolean).join(' → ');
-  return `${getOrderLabel(order)}${route ? ` · ${route}` : ''}`;
-}
-
-function NotificationIcon({ type }) {
-  const className = 'h-4 w-4';
-  if (type === 'new-order') return <ShoppingBag className={className} />;
-  if (type === 'driver') return <Bike className={className} />;
-  if (type === 'package') return <PackageCheck className={className} />;
-  if (type === 'check') return <Check className={className} />;
-  if (type === 'x') return <X className={className} />;
-  return <BellRing className={className} />;
-}
-
-function formatTime(value) {
+const keyFor = (id) => `anjemdips_notif_${id}`;
+const snapshotFor = (id) => `anjemdips_notif_snapshot_${id}`;
+const readStorage = (key, fallback) => {
+  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+};
+const timeLabel = (value) => {
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  return new Intl.DateTimeFormat('id-ID', {
-    day: 'numeric',
-    month: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(date);
+  return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(date);
+};
+
+function IconFor({ type }) {
+  if (type === 'driver') return <Bike size={17} />;
+  if (type === 'package') return <PackageCheck size={17} />;
+  if (type === 'check') return <Check size={17} />;
+  if (type === 'cancel') return <X size={17} />;
+  return <ShoppingBag size={17} />;
 }
 
 export default function NotificationCenter() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [notifications, setNotifications] = useState([]);
   const [open, setOpen] = useState(false);
+  const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
-  const previousOrders = useRef(null);
-  const isMounted = useRef(true);
-
+  const [panelStyle, setPanelStyle] = useState({ top: 72, right: 16 });
+  const snapshot = useRef(null);
+  const buttonRef = useRef(null);
   const isDriver = user?.role === 'driver';
-  const unreadCount = useMemo(
-    () => notifications.filter((item) => !item.read).length,
-    [notifications]
-  );
 
-  const saveNotifications = useCallback((next) => {
-    if (!user?.id) return;
-    const limited = next.slice(0, MAX_NOTIFICATIONS);
-    setNotifications(limited);
-    localStorage.setItem(storageKey(user.id), JSON.stringify(limited));
+  const unread = useMemo(() => items.filter((item) => !item.read).length, [items]);
+
+  const store = useCallback((next) => {
+    const limited = next.slice(0, MAX_ITEMS);
+    setItems(limited);
+    if (user?.id) localStorage.setItem(keyFor(user.id), JSON.stringify(limited));
   }, [user?.id]);
 
-  const addNotifications = useCallback((created) => {
-    if (!created.length) return;
-    setNotifications((current) => {
-      const next = [...created, ...current].slice(0, MAX_NOTIFICATIONS);
-      if (user?.id) localStorage.setItem(storageKey(user.id), JSON.stringify(next));
-      return next;
-    });
-  }, [user?.id]);
-
-  const processOrders = useCallback((orders) => {
+  const refresh = useCallback(async (showLoading = false) => {
     if (!user?.id) return;
-
-    const currentMap = {};
-    orders.forEach((order) => {
-      currentMap[String(order.id)] = {
-        status: order.status,
-        driver_id: order.driver_id || null,
-        customer_id: order.customer_id || null,
-        jenis_layanan: order.jenis_layanan,
-        titik_jemput: order.titik_jemput,
-        titik_antar: order.titik_antar,
-      };
-    });
-
-    // Snapshot pertama hanya menjadi baseline agar tidak membanjiri notifikasi
-    // dengan pesanan lama setiap kali pengguna login atau membuka aplikasi.
-    if (previousOrders.current === null) {
-      previousOrders.current = currentMap;
-      localStorage.setItem(snapshotKey(user.id), JSON.stringify(currentMap));
-      return;
-    }
-
-    const previous = previousOrders.current;
-    const generated = [];
-
-    for (const order of orders) {
-      const id = String(order.id);
-      const before = previous[id];
-      const description = getOrderDescription(order);
-
-      if (!before) {
-        if (isDriver && order.status === 'pending') {
-          generated.push(makeNotification({
-            title: 'Ada orderan baru!',
-            message: `${description}. Cek detailnya dan ambil order jika cocok.`,
-            orderId: order.id,
-            type: 'new-order',
-          }));
-        } else if (!isDriver && String(order.customer_id) === String(user.id)) {
-          generated.push(makeNotification({
-            title: 'Pesanan berhasil dibuat',
-            message: `${description}. Pesananmu sedang menunggu driver.`,
-            orderId: order.id,
-            type: 'package',
-          }));
-        }
-        continue;
-      }
-
-      if (before.status !== order.status) {
-        if (isDriver && String(order.driver_id) === String(user.id)) {
-          const info = statusMessages[order.status];
-          if (info) {
-            generated.push(makeNotification({
-              title: `Status pesanan: ${info.title}`,
-              message: `${description}. ${info.message}`,
-              orderId: order.id,
-              type: info.icon,
-            }));
-          }
-        } else if (!isDriver && String(order.customer_id) === String(user.id)) {
-          const info = statusMessages[order.status];
-          if (info) {
-            generated.push(makeNotification({
-              title: info.title,
-              message: `${description}. ${info.message}`,
-              orderId: order.id,
-              type: info.icon,
-            }));
-          }
-        }
-      }
-
-      if (isDriver && !before.driver_id && order.driver_id && String(order.driver_id) === String(user.id)) {
-        generated.push(makeNotification({
-          title: 'Order berhasil kamu ambil',
-          message: `${description}. Detail pesanan sudah masuk ke Tugas Saya.`,
-          orderId: order.id,
-          type: 'check',
-        }));
-      }
-    }
-
-    previousOrders.current = currentMap;
-    localStorage.setItem(snapshotKey(user.id), JSON.stringify(currentMap));
-    addNotifications(generated);
-  }, [user?.id, isDriver, addNotifications]);
-
-  const fetchLatest = useCallback(async (showLoader = false) => {
-    if (!user?.id) return;
-    if (showLoader) setLoading(true);
+    if (showLoading) setLoading(true);
     try {
       const response = await api.get('/orders');
-      if (!isMounted.current) return;
       const orders = Array.isArray(response.data?.data) ? response.data.data : [];
-      processOrders(orders);
+      const current = {};
+      const created = [];
+
+      orders.forEach((order) => {
+        const id = String(order.id);
+        const belongsToUser = isDriver
+          ? String(order.driver_id || '') === String(user.id) || order.status === 'pending'
+          : String(order.customer_id || '') === String(user.id);
+        if (!belongsToUser) return;
+        current[id] = { status: order.status, driver_id: order.driver_id || null };
+        const before = snapshot.current?.[id];
+        const service = order.jenis_layanan === 'jastip' ? 'Jastip' : 'Anjem';
+        if (!before) {
+          if (snapshot.current !== null && isDriver && order.status === 'pending') {
+            created.push({ title: 'Ada pesanan baru', message: `${service} baru menunggu driver. Buka daftar pesanan untuk melihat detail.`, type: 'new', orderId: order.id });
+          } else if (snapshot.current !== null && !isDriver) {
+            created.push({ title: 'Pesanan berhasil dibuat', message: `${service} kamu sudah tercatat dan sedang menunggu proses berikutnya.`, type: 'package', orderId: order.id });
+          }
+          return;
+        }
+        if (before.status !== order.status && statusCopy[order.status]) {
+          const [title, message, type] = statusCopy[order.status];
+          created.push({ title, message: `${service} · ${message}`, type, orderId: order.id });
+        }
+      });
+
+      if (snapshot.current === null) {
+        snapshot.current = current;
+      } else if (created.length) {
+        const stamped = created.map((item) => ({
+          ...item,
+          id: `${item.orderId}-${item.type}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          createdAt: new Date().toISOString(),
+          read: false,
+        }));
+        setItems((previous) => {
+          const next = [...stamped, ...previous].slice(0, MAX_ITEMS);
+          localStorage.setItem(keyFor(user.id), JSON.stringify(next));
+          return next;
+        });
+        if (!isDriver && created.some((item) => item.type === 'cancel')) {
+          // status batal juga tetap muncul sebagai notifikasi riwayat
+        }
+        snapshot.current = current;
+      } else {
+        snapshot.current = current;
+      }
+      localStorage.setItem(snapshotFor(user.id), JSON.stringify(current));
     } catch {
-      // Kegagalan jaringan tidak menghapus notifikasi atau snapshot sebelumnya.
+      // Jangan menghapus notifikasi ketika koneksi/server sedang bermasalah.
     } finally {
-      if (isMounted.current && showLoader) setLoading(false);
+      if (showLoading) setLoading(false);
     }
-  }, [user?.id, processOrders]);
+  }, [user?.id, isDriver]);
 
   useEffect(() => {
-    isMounted.current = true;
-    previousOrders.current = null;
     if (!user?.id) return undefined;
-
-    setNotifications(readJson(storageKey(user.id), []));
-    // Gunakan snapshot tersimpan agar perubahan yang terjadi ketika tab ditutup
-    // tetap dapat dideteksi saat aplikasi dibuka kembali.
-    previousOrders.current = readJson(snapshotKey(user.id), null);
-
-    fetchLatest(true);
+    setItems(readStorage(keyFor(user.id), []));
+    snapshot.current = readStorage(snapshotFor(user.id), null);
+    refresh(true);
     const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') fetchLatest(false);
-    }, POLL_INTERVAL);
+      if (document.visibilityState === 'visible') refresh(false);
+    }, POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [user?.id, refresh]);
 
-    const onFocus = () => fetchLatest(false);
-    window.addEventListener('focus', onFocus);
-
-    return () => {
-      isMounted.current = false;
-      window.clearInterval(timer);
-      window.removeEventListener('focus', onFocus);
-    };
-  }, [user?.id, fetchLatest]);
-
-  const markRead = (id) => {
-    saveNotifications(notifications.map((item) =>
-      item.id === id ? { ...item, read: true } : item
-    ));
+  const toggle = () => {
+    if (!open && buttonRef.current) {
+      const rect = buttonRef.current.getBoundingClientRect();
+      setPanelStyle({ top: Math.min(rect.bottom + 10, window.innerHeight - 380), right: Math.max(12, window.innerWidth - rect.right) });
+    }
+    setOpen((value) => !value);
   };
 
-  const markAllRead = () => {
-    saveNotifications(notifications.map((item) => ({ ...item, read: true })));
-  };
-
-  const clearAll = () => saveNotifications([]);
-
-  const openNotification = (item) => {
-    markRead(item.id);
+  const markAllRead = () => store(items.map((item) => ({ ...item, read: true })));
+  const clearAll = () => store([]);
+  const openItem = (item) => {
+    store(items.map((entry) => entry.id === item.id ? { ...entry, read: true } : entry));
     setOpen(false);
     navigate(isDriver ? '/driver/pesanan' : '/customer/pesanan');
   };
@@ -278,123 +144,43 @@ export default function NotificationCenter() {
   if (!user) return null;
 
   return (
-    <div className="relative">
+    <>
       <button
+        ref={buttonRef}
         type="button"
-        onClick={() => setOpen((value) => !value)}
-        aria-label={`Notifikasi${unreadCount ? `, ${unreadCount} belum dibaca` : ''}`}
+        onClick={toggle}
+        aria-label={`Buka notifikasi${unread ? `, ${unread} belum dibaca` : ''}`}
         aria-expanded={open}
-        className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] bg-white/12 text-white transition hover:bg-white/20 active:scale-95"
+        title="Notifikasi"
+        style={{ position: 'relative', width: 44, height: 44, border: '1px solid #E2E8F0', borderRadius: 14, background: '#fff', color: '#0F172A', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flex: 'none', zIndex: 2, pointerEvents: 'auto' }}
       >
-        <Bell className="h-[19px] w-[19px]" strokeWidth={2.2} />
-        {unreadCount > 0 && (
-          <span className="absolute -right-1 -top-1 flex h-[19px] min-w-[19px] items-center justify-center rounded-full border-2 border-[#0B4F4A] bg-[#FBBF24] px-1 text-[10px] font-extrabold leading-none text-[#0F172A]">
-            {unreadCount > 99 ? '99+' : unreadCount}
-          </span>
-        )}
+        <Bell size={19} strokeWidth={2} />
+        {unread > 0 && <span style={{ position: 'absolute', top: -5, right: -5, minWidth: 19, height: 19, padding: '0 4px', borderRadius: 99, background: '#FBBF24', color: '#111827', border: '2px solid white', fontSize: 10, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{unread > 99 ? '99+' : unread}</span>}
       </button>
 
-      {open && (
+      {open && createPortal(
         <>
-          <button
-            type="button"
-            aria-label="Tutup notifikasi"
-            onClick={() => setOpen(false)}
-            className="fixed inset-0 z-30 cursor-default"
-          />
-          <section className="absolute right-0 top-[calc(100%+12px)] z-40 flex max-h-[min(560px,75vh)] w-[min(360px,calc(100vw-32px))] flex-col overflow-hidden rounded-[18px] bg-white text-[#0F172A] shadow-[0_18px_55px_rgba(15,23,42,0.22)] ring-1 ring-black/5">
-            <div className="flex items-center justify-between border-b border-[#E2E6EB] px-4 py-3.5">
-              <div>
-                <h2 className="text-[14px] font-extrabold">Notifikasi</h2>
-                <p className="mt-0.5 text-[11px] text-[#64748B]">
-                  {unreadCount ? `${unreadCount} belum dibaca` : 'Kamu sudah mengetahui semuanya'}
-                </p>
-              </div>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={markAllRead}
-                  disabled={!unreadCount}
-                  title="Tandai semua dibaca"
-                  className="flex h-8 w-8 items-center justify-center rounded-lg text-[#0F766E] hover:bg-[#E6F4F2] disabled:opacity-30"
-                >
-                  <CheckCheck className="h-4 w-4" />
-                </button>
-                <button
-                  type="button"
-                  onClick={clearAll}
-                  disabled={!notifications.length}
-                  title="Hapus semua notifikasi"
-                  className="flex h-8 w-8 items-center justify-center rounded-lg text-[#64748B] hover:bg-[#F1F5F9] disabled:opacity-30"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
+          <button type="button" aria-label="Tutup panel notifikasi" onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 9998, border: 0, background: 'transparent', cursor: 'default' }} />
+          <section role="dialog" aria-label="Notifikasi" style={{ position: 'fixed', top: Math.max(12, panelStyle.top), right: panelStyle.right, zIndex: 9999, width: 'min(360px, calc(100vw - 24px))', maxHeight: 'min(520px, calc(100dvh - 90px))', background: '#fff', borderRadius: 18, boxShadow: '0 18px 55px rgba(15,23,42,.22)', border: '1px solid #E2E8F0', display: 'flex', flexDirection: 'column', overflow: 'hidden', color: '#0F172A' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', borderBottom: '1px solid #E2E8F0' }}>
+              <div><strong style={{ fontSize: 14 }}>Notifikasi</strong><div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>{unread ? `${unread} belum dibaca` : 'Tidak ada notifikasi baru'}</div></div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button type="button" title="Tandai semua dibaca" onClick={markAllRead} disabled={!unread} style={{ width: 32, height: 32, border: 0, borderRadius: 8, background: '#E6F4F2', color: '#0F766E', cursor: unread ? 'pointer' : 'not-allowed', opacity: unread ? 1 : .4 }}><CheckCheck size={16} /></button>
+                <button type="button" title="Tutup" onClick={() => setOpen(false)} style={{ width: 32, height: 32, border: 0, borderRadius: 8, background: '#F1F5F9', color: '#475569', cursor: 'pointer' }}><X size={16} /></button>
               </div>
             </div>
-
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              {loading && !notifications.length ? (
-                <div className="flex items-center justify-center gap-2 px-4 py-10 text-[12px] text-[#64748B]">
-                  <Clock3 className="h-4 w-4 animate-pulse" />
-                  Memeriksa aktivitas terbaru...
-                </div>
-              ) : notifications.length === 0 ? (
-                <div className="flex flex-col items-center px-6 py-10 text-center">
-                  <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-[#E6F4F2] text-[#0F766E]">
-                    <BellRing className="h-5 w-5" />
-                  </div>
-                  <p className="text-[13px] font-bold">Belum ada notifikasi</p>
-                  <p className="mt-1 text-[11px] leading-relaxed text-[#64748B]">
-                    {isDriver
-                      ? 'Info orderan baru dan perubahan tugas akan muncul di sini.'
-                      : 'Update pesanan, driver, dan status pengantaran akan muncul di sini.'}
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => fetchLatest(true)}
-                    className="mt-4 inline-flex items-center gap-1.5 rounded-full bg-[#E6F4F2] px-3 py-2 text-[11px] font-bold text-[#0F766E] hover:bg-[#D5ECE8]"
-                  >
-                    Periksa sekarang <ArrowRight className="h-3 w-3" />
-                  </button>
-                </div>
-              ) : (
-                <div className="divide-y divide-[#F1F5F9]">
-                  {notifications.map((item) => (
-                    <button
-                      type="button"
-                      key={item.id}
-                      onClick={() => openNotification(item)}
-                      className={`flex w-full gap-3 px-4 py-3.5 text-left transition hover:bg-[#F8FAFC] ${
-                        item.read ? 'bg-white' : 'bg-[#F0F9F8]'
-                      }`}
-                    >
-                      <span className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
-                        item.read ? 'bg-[#F1F5F9] text-[#64748B]' : 'bg-[#DDF3EF] text-[#0F766E]'
-                      }`}>
-                        <NotificationIcon type={item.type} />
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="flex items-start justify-between gap-2">
-                          <span className="text-[12px] font-extrabold leading-snug">{item.title}</span>
-                          {!item.read && <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-[#0F766E]" />}
-                        </span>
-                        <span className="mt-1 block text-[11px] leading-relaxed text-[#64748B]">{item.message}</span>
-                        <span className="mt-2 block text-[10px] font-medium text-[#94A3B8]">{formatTime(item.createdAt)}</span>
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              )}
+            <div style={{ overflowY: 'auto', minHeight: 80 }}>
+              {loading && !items.length ? <div style={{ padding: 28, textAlign: 'center', color: '#64748B', fontSize: 12 }}><Clock3 size={18} style={{ margin: '0 auto 8px' }} />Memeriksa notifikasi...</div> : items.length ? items.map((item) => (
+                <button key={item.id} type="button" onClick={() => openItem(item)} style={{ width: '100%', display: 'flex', gap: 11, padding: '13px 15px', border: 0, borderBottom: '1px solid #F1F5F9', textAlign: 'left', background: item.read ? '#fff' : '#F0F9F8', cursor: 'pointer' }}>
+                  <span style={{ width: 36, height: 36, borderRadius: 11, flex: 'none', display: 'grid', placeItems: 'center', background: item.read ? '#F1F5F9' : '#DDF3EF', color: '#0F766E' }}><IconFor type={item.type} /></span>
+                  <span style={{ minWidth: 0, flex: 1 }}><span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 12, fontWeight: 800 }}>{item.title}{!item.read && <i style={{ width: 7, height: 7, borderRadius: 9, background: '#0F766E', marginTop: 4, flex: 'none' }} />}</span><span style={{ display: 'block', marginTop: 4, color: '#64748B', fontSize: 11, lineHeight: 1.5 }}>{item.message}</span><span style={{ display: 'block', marginTop: 6, color: '#94A3B8', fontSize: 10 }}>{timeLabel(item.createdAt)}</span></span>
+                </button>
+              )) : <div style={{ padding: '28px 22px', textAlign: 'center' }}><div style={{ width: 44, height: 44, margin: '0 auto 10px', borderRadius: 14, background: '#E6F4F2', color: '#0F766E', display: 'grid', placeItems: 'center' }}><Bell size={20} /></div><strong style={{ fontSize: 12 }}>Belum ada notifikasi</strong><p style={{ margin: '5px 0 12px', color: '#64748B', fontSize: 11, lineHeight: 1.5 }}>{isDriver ? 'Info pesanan baru dan perubahan tugas akan muncul di sini.' : 'Update status pesananmu akan muncul di sini.'}</p><button type="button" onClick={() => refresh(true)} style={{ border: 0, borderRadius: 99, padding: '8px 13px', background: '#E6F4F2', color: '#0F766E', fontSize: 11, fontWeight: 800, cursor: 'pointer' }}>Periksa sekarang</button></div>}
             </div>
-
-            <div className="border-t border-[#E2E6EB] px-4 py-2.5">
-              <p className="text-center text-[10px] text-[#94A3B8]">
-                Update otomatis setiap 15 detik selama aplikasi aktif
-              </p>
-            </div>
+            {items.length > 0 && <div style={{ padding: '9px 14px', borderTop: '1px solid #E2E8F0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><span style={{ color: '#94A3B8', fontSize: 10 }}>Pembaruan otomatis setiap 12 detik</span><button type="button" onClick={clearAll} style={{ border: 0, background: 'transparent', color: '#B91C1C', fontSize: 10, fontWeight: 700, cursor: 'pointer' }}>Hapus semua</button></div>}
           </section>
-        </>
+        </>, document.body
       )}
-    </div>
+    </>
   );
 }

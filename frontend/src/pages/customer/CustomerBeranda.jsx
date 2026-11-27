@@ -5,6 +5,7 @@ import api from '../../api/axios';
 import Card from '../../components/Card';
 import Chip from '../../components/Chip';
 import BottomNav from '../../components/BottomNav';
+import NotificationCenter from '../../components/NotificationCenter';
 
 const ACTIVE_STATUSES = [
   'pending',
@@ -110,34 +111,7 @@ export default function CustomerBeranda() {
           </div>
         </div>
 
-        <div
-          style={{
-            width: '44px',
-            height: '44px',
-            borderRadius: '14px',
-            background: '#fff',
-            boxShadow: '0 0 0 1px rgba(15,23,42,.06)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: '#0F172A',
-            flex: 'none',
-          }}
-        >
-          <svg
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
-            <path d="M6 9a6 6 0 0 1 12 0c0 6 2 7 2 7H4s2-1 2-7zM10 20a2 2 0 0 0 4 0" />
-          </svg>
-        </div>
+        <NotificationCenter />
       </div>
 
       {/* Main Content */}
@@ -459,4 +433,3 @@ export default function CustomerBeranda() {
     </div>
   );
 }
-

@@ -6,6 +6,7 @@ import Card from '../../components/Card';
 import Chip from '../../components/Chip';
 import Button from '../../components/Button';
 import BottomNav from '../../components/BottomNav';
+import NotificationCenter from '../../components/NotificationCenter';
 import { getDriverVehicleProfile } from '../../mocks/driverMocks';
 import { formatRibuan, waktuLabel } from '../../utils/format';
 
@@ -208,6 +209,8 @@ export default function DriverBeranda() {
           </div>
         </div>
 
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, flex: 'none' }}>
+          <NotificationCenter />
         {/* Toggle Status OFF / ON */}
         <button
           type="button"
@@ -238,6 +241,7 @@ export default function DriverBeranda() {
           />
           {isOnline ? 'ON · Aktif' : 'OFF · Nonaktif'}
         </button>
+        </div>
       </div>
 
       {/* Konten Utama */}
