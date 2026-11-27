@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import api from '../../api/axios';
 import Card from '../../components/Card';
@@ -15,6 +15,9 @@ export default function CustomerJastip() {
 
   const [namaBarang, setNamaBarang] = useState('');
   const [titikJemput, setTitikJemput] = useState('');
+  const [spotOptions, setSpotOptions] = useState([]);
+  const [spotDropdownOpen, setSpotDropdownOpen] = useState(false);
+  const [spotsLoading, setSpotsLoading] = useState(false);
   const [titikAntar, setTitikAntar] = useState('');
   const [waktuBerangkat, setWaktuBerangkat] = useState('sekarang'); // 'sekarang' | 'jadwal'
   const [jadwalAt, setJadwalAt] = useState('');
@@ -24,6 +27,55 @@ export default function CustomerJastip() {
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+
+  // Gunakan daftar spot yang sama dengan form AnJem.
+  // Customer tetap dapat mengetik lokasi bebas jika spot tidak tersedia.
+  useEffect(() => {
+    let active = true;
+
+    const loadSpots = async () => {
+      setSpotsLoading(true);
+      try {
+        const response = await api.get('/spots');
+        const rows = Array.isArray(response.data?.data) ? response.data.data : [];
+        const normalized = rows
+          .map((spot) => ({
+            id: spot.id ?? spot.nama_lokasi,
+            name: String(spot.nama_lokasi || '').trim(),
+            category: String(spot.kategori || '').trim(),
+            address: String(spot.alamat || '').trim(),
+          }))
+          .filter((spot) => spot.name);
+
+        if (active) setSpotOptions(normalized);
+      } catch (loadError) {
+        if (active) setSpotOptions([]);
+      } finally {
+        if (active) setSpotsLoading(false);
+      }
+    };
+
+    loadSpots();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const filteredSpotOptions = useMemo(() => {
+    const query = titikJemput.trim().toLocaleLowerCase('id-ID');
+    if (!query) return spotOptions;
+    return spotOptions.filter((spot) =>
+      `${spot.name} ${spot.category} ${spot.address}`
+        .toLocaleLowerCase('id-ID')
+        .includes(query)
+    );
+  }, [spotOptions, titikJemput]);
+
+  const selectSpot = (spot) => {
+    setTitikJemput(spot.name);
+    setSpotDropdownOpen(false);
+    if (error) setError('');
+  };
 
   const numericHargaBarang = Number(hargaBarangDigits) || 0;
   const numericOngkir = Number(ongkirDigits) || 0;
@@ -198,15 +250,114 @@ export default function CustomerJastip() {
             }}
           />
 
-          <Input
-            label="Beli / ambil di"
-            placeholder="Nama tempat atau alamat"
-            value={titikJemput}
-            onChange={(e) => {
-              setTitikJemput(e.target.value);
-              if (error) setError('');
-            }}
-          />
+          <div style={{ position: 'relative', width: '100%' }}>
+            <Input
+              label="Beli / ambil di"
+              placeholder="Pilih spot atau ketik lokasi manual"
+              value={titikJemput}
+              autoComplete="off"
+              role="combobox"
+              aria-label="Beli / ambil di"
+              aria-autocomplete="list"
+              aria-expanded={spotDropdownOpen}
+              aria-controls="spot-jastip-options"
+              onFocus={() => setSpotDropdownOpen(true)}
+              onClick={() => setSpotDropdownOpen(true)}
+              onChange={(e) => {
+                setTitikJemput(e.target.value);
+                setSpotDropdownOpen(true);
+                if (error) setError('');
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setSpotDropdownOpen(false);
+                if (e.key === 'Enter' && spotDropdownOpen && filteredSpotOptions.length) {
+                  e.preventDefault();
+                  selectSpot(filteredSpotOptions[0]);
+                }
+              }}
+            />
+            {spotDropdownOpen && (
+              <div
+                id="spot-jastip-options"
+                role="listbox"
+                aria-label="Daftar spot lokasi beli atau ambil"
+                style={{
+                  position: 'absolute',
+                  zIndex: 30,
+                  top: 'calc(100% + 4px)',
+                  left: 0,
+                  right: 0,
+                  maxHeight: '190px',
+                  overflowY: 'auto',
+                  background: '#fff',
+                  border: '1px solid #E2E8F0',
+                  borderRadius: '10px',
+                  boxShadow: '0 8px 24px rgba(15,23,42,.14)',
+                }}
+              >
+                {spotsLoading ? (
+                  <div style={{ padding: '11px 12px', color: '#64748B', fontSize: '12px' }}>
+                    Memuat daftar spot...
+                  </div>
+                ) : filteredSpotOptions.length ? (
+                  filteredSpotOptions.map((spot) => (
+                    <button
+                      key={String(spot.id)}
+                      type="button"
+                      role="option"
+                      aria-selected={titikJemput === spot.name}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => selectSpot(spot)}
+                      style={{
+                        display: 'block',
+                        width: '100%',
+                        padding: '10px 12px',
+                        border: 0,
+                        borderBottom: '1px solid #F1F5F9',
+                        background: titikJemput === spot.name ? '#F0FDFA' : '#fff',
+                        textAlign: 'left',
+                        cursor: 'pointer',
+                        color: '#0F172A',
+                      }}
+                    >
+                      <span style={{ display: 'block', fontSize: '12px', fontWeight: 700 }}>
+                        {spot.name}
+                      </span>
+                      {(spot.category || spot.address) && (
+                        <span style={{ display: 'block', marginTop: '2px', color: '#64748B', fontSize: '10px' }}>
+                          {[spot.category, spot.address].filter(Boolean).join(' · ')}
+                        </span>
+                      )}
+                    </button>
+                  ))
+                ) : (
+                  <div style={{ padding: '11px 12px', color: '#64748B', fontSize: '12px' }}>
+                    {spotOptions.length
+                      ? 'Spot tidak ditemukan. Lokasi yang kamu ketik tetap bisa digunakan.'
+                      : 'Daftar spot belum tersedia. Silakan ketik lokasi secara manual.'}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => setSpotDropdownOpen(false)}
+                  style={{
+                    width: '100%',
+                    padding: '9px 12px',
+                    border: 0,
+                    background: '#F8FAFC',
+                    color: '#0F766E',
+                    textAlign: 'left',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Gunakan lokasi yang diketik
+                </button>
+              </div>
+            )}
+          </div>
 
           <Input
             label="Antar ke"
@@ -327,8 +478,17 @@ export default function CustomerJastip() {
             gap: '12px',
           }}
         >
-          <div style={{ display: 'flex', gap: '12px' }}>
-            <label style={{ flex: 1 }}>
+          <div
+            style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '12px',
+              width: '100%',
+              minWidth: 0,
+              boxSizing: 'border-box',
+            }}
+          >
+            <label style={{ flex: '1 1 180px', minWidth: 0, maxWidth: '100%' }}>
               <div
                 style={{
                   fontSize: '11px',
@@ -348,17 +508,24 @@ export default function CustomerJastip() {
                   borderRadius: '12px',
                   background: '#F5F6F8',
                   padding: '0 12px',
+                  width: '100%',
+                  minWidth: 0,
+                  maxWidth: '100%',
+                  boxSizing: 'border-box',
                 }}
               >
-                <span style={{ color: '#5B6678', fontWeight: 700 }}>Rp</span>
+                <span style={{ color: '#5B6678', fontWeight: 700, flex: 'none' }}>Rp</span>
                 <input
                   aria-label="Perkiraan harga barang"
                   value={formatRibuan(hargaBarangDigits)}
                   onChange={handleHargaBarangChange}
                   inputMode="numeric"
                   style={{
-                    flex: 1,
+                    flex: '1 1 0%',
+                    width: '100%',
                     minWidth: 0,
+                    maxWidth: '100%',
+                    boxSizing: 'border-box',
                     border: 0,
                     outline: 0,
                     background: 'transparent',
@@ -369,7 +536,7 @@ export default function CustomerJastip() {
               </div>
             </label>
 
-            <label style={{ flex: 1 }}>
+            <label style={{ flex: '1 1 180px', minWidth: 0, maxWidth: '100%' }}>
               <div
                 style={{
                   fontSize: '11px',
@@ -389,17 +556,24 @@ export default function CustomerJastip() {
                   borderRadius: '12px',
                   background: '#F5F6F8',
                   padding: '0 12px',
+                  width: '100%',
+                  minWidth: 0,
+                  maxWidth: '100%',
+                  boxSizing: 'border-box',
                 }}
               >
-                <span style={{ color: '#5B6678', fontWeight: 700 }}>Rp</span>
+                <span style={{ color: '#5B6678', fontWeight: 700, flex: 'none' }}>Rp</span>
                 <input
                   aria-label="Upah driver (tawaran)"
                   value={formatRibuan(ongkirDigits)}
                   onChange={handleOngkirChange}
                   inputMode="numeric"
                   style={{
-                    flex: 1,
+                    flex: '1 1 0%',
+                    width: '100%',
                     minWidth: 0,
+                    maxWidth: '100%',
+                    boxSizing: 'border-box',
                     border: 0,
                     outline: 0,
                     background: 'transparent',
