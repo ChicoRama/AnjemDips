@@ -115,9 +115,13 @@ export default function CustomerLacak() {
     setError('');
     setCancelling(true);
     try {
-      await api.patch(`/orders/${order.id}/status`, {
-        status: 'cancelled',
-      });
+      // Customer harus memakai endpoint pembatalan khusus.
+      // PATCH /status hanya untuk perubahan status oleh driver.
+      const response = await api.post(`/orders/${order.id}/cancel`);
+      if (response.data?.success === false) {
+        throw new Error(response.data?.message || 'Pesanan gagal dibatalkan.');
+      }
+      setOrder(response.data?.data || { ...order, status: 'cancelled' });
       navigate('/customer');
     } catch (err) {
       setError(
