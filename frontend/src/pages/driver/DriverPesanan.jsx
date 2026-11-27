@@ -279,14 +279,14 @@ export default function DriverPesanan() {
                     <div style={{ fontWeight: 800 }}>{customerName}</div>
                     <div style={{ color: '#5B6678', fontSize: '12px' }}>
                       {isJastip
-                        ? `JasTip Â· ${order.nama_barang || 'Titip barang'}${
+                        ? `JasTip · ${order.nama_barang || 'Titip barang'}${
                             order.waktu_berangkat === 'jadwal'
-                              ? ` Â· ${waktuLabel(order)}`
+                              ? ` · ${waktuLabel(order)}`
                               : ''
                           }`
-                        : `AnJem Â· ${order.jumlah_penumpang || 1} penumpang${
+                        : `AnJem · ${order.jumlah_penumpang || 1} penumpang${
                             order.waktu_berangkat === 'jadwal'
-                              ? ` Â· ${waktuLabel(order)}`
+                              ? ` · ${waktuLabel(order)}`
                               : ''
                           }`}
                     </div>
@@ -458,8 +458,8 @@ export default function DriverPesanan() {
                     {updatingId === order.id
                       ? 'Memperbarui...'
                       : isJastip
-                      ? 'Barang dibeli Â· Mulai antar'
-                      : 'Sudah jemput Â· Mulai antar'}
+                      ? 'Barang dibeli · Mulai antar'
+                      : 'Sudah jemput · Mulai antar'}
                   </button>
                 ) : (
                   <button

@@ -211,7 +211,7 @@ export default function DriverRequestDetail() {
           <Chip variant={isJastip ? 'warning' : 'teal'}>
             {isJastip
               ? 'JasTip'
-              : `AnJem Â· ${order.jenis_kendaraan === 'mobil' ? 'Mobil' : 'Motor'}`}
+              : `AnJem · ${order.jenis_kendaraan === 'mobil' ? 'Mobil' : 'Motor'}`}
           </Chip>
         )}
       </div>
@@ -458,7 +458,7 @@ export default function DriverRequestDetail() {
                 {isOverCapacity && (
                   <div style={{ fontSize: '12px', color: '#7F1D1D' }}>
                     Jumlah penumpang melebihi kapasitas kendaraanmu. Kamu bisa
-                    menawar harga ekstra lewat tombol â€œTawar hargaâ€.
+                    menawar harga ekstra lewat tombol “Tawar harga”.
                   </div>
                 )}
               </Card>
