@@ -1,3 +1,4 @@
+
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../../api/axios';
@@ -9,8 +10,7 @@ import { useAuth } from '../../context/AuthContext';
 const HISTORY_STATUSES = ['completed', 'cancelled'];
 
 function formatRibuan(value) {
-  const num = Number(value) || 0;
-  return num.toLocaleString('id-ID');
+  return (Number(value) || 0).toLocaleString('id-ID');
 }
 
 function formatTanggal(isoString) {
@@ -24,56 +24,90 @@ function formatTanggal(isoString) {
   });
 }
 
+function readCache(key) {
+  try {
+    const cached = JSON.parse(localStorage.getItem(key) || '[]');
+    return Array.isArray(cached) ? cached : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCache(key, data) {
+  try {
+    localStorage.setItem(key, JSON.stringify(data));
+  } catch (error) {
+    console.warn('Cache riwayat tidak dapat disimpan:', error);
+  }
+}
+
 export default function CustomerHistory() {
   const { user } = useAuth();
-  const cacheKey = `anjemdips:history:customer:${user?.id || 'guest'}`;
-  const [orders, setOrders] = useState([]);
-  const [filter, setFilter] = useState('all'); // 'all' | 'completed' | 'cancelled'
+  const userId = user?.id;
+  const cacheKey = `anjemdips:history:customer:${userId || 'guest'}`;
+
+  const [orders, setOrders] = useState(() => readCache(cacheKey));
+  const [filter, setFilter] = useState('all');
   const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState(null);
   const [error, setError] = useState('');
 
   const fetchHistory = useCallback(async () => {
+    if (!userId) {
+      setOrders([]);
+      setLoading(false);
+      return;
+    }
+
+    // Tampilkan cache terlebih dahulu.
+    const cached = readCache(cacheKey);
+    setOrders(cached);
+    setLoading(false);
+
     try {
       const res = await api.get('/orders');
       const list = Array.isArray(res.data?.data) ? res.data.data : [];
-      const historyList = list.filter((item) =>
-        HISTORY_STATUSES.includes(item.status)
+
+      const historyList = list.filter(
+        (item) =>
+          item.customer_id === userId &&
+          HISTORY_STATUSES.includes(item.status)
       );
-      setOrders(historyList);
-      try {
-        localStorage.setItem(cacheKey, JSON.stringify(historyList));
-      } catch (storageError) {
-        console.warn('Cache riwayat tidak dapat disimpan:', storageError);
-      }
-      setError('');
-    } catch {
-      try {
-        const cached = JSON.parse(localStorage.getItem(cacheKey) || '[]');
-        if (Array.isArray(cached)) setOrders(cached);
-        else setOrders([]);
-      } catch {
+
+      // Jangan menimpa cache jika API tidak mengembalikan riwayat.
+      if (historyList.length > 0) {
+        setOrders(historyList);
+        saveCache(cacheKey, historyList);
+      } else if (cached.length > 0) {
+        setOrders(cached);
+      } else {
         setOrders([]);
       }
+
+      setError('');
+    } catch (err) {
+      console.warn('Gagal mengambil riwayat dari server:', err);
+      setOrders(cached);
       setError('Tidak ada koneksi. Menampilkan riwayat terakhir yang tersimpan.');
     } finally {
       setLoading(false);
     }
-  }, [cacheKey]);
+  }, [userId, cacheKey]);
 
   useEffect(() => {
     fetchHistory();
   }, [fetchHistory]);
 
-  // Migrasi dari CustomerDashboard.jsx: hapus riwayat pesanan yang dibatalkan
   const handleDeleteOrder = async (orderId) => {
     setError('');
     setDeletingId(orderId);
+
     try {
       await api.delete(`/orders/${orderId}`);
+
       setOrders((prev) => {
         const next = prev.filter((item) => item.id !== orderId);
-        try { localStorage.setItem(cacheKey, JSON.stringify(next)); } catch {}
+        saveCache(cacheKey, next);
         return next;
       });
     } catch (err) {
@@ -108,7 +142,6 @@ export default function CustomerHistory() {
         color: '#0F172A',
       }}
     >
-      {/* Header */}
       <div style={{ padding: '20px 20px 0', flex: 'none' }}>
         <h1
           style={{
@@ -124,7 +157,6 @@ export default function CustomerHistory() {
           Riwayat perjalanan dan titipan.
         </div>
 
-        {/* Filter Tabs */}
         <div
           style={{
             display: 'flex',
@@ -165,7 +197,6 @@ export default function CustomerHistory() {
         </div>
       </div>
 
-      {/* Daftar Riwayat */}
       <div
         style={{
           flex: 1,
@@ -239,7 +270,6 @@ export default function CustomerHistory() {
                   gap: '10px',
                 }}
               >
-                {/* Header Kartu */}
                 <div
                   style={{
                     display: 'flex',
@@ -310,11 +340,11 @@ export default function CustomerHistory() {
 
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: 800 }}>
-                      {isJastip ? 'JasTip' : `AnJem Â· ${vehicleLabel}`}
+                      {isJastip ? 'JasTip' : `AnJem · ${vehicleLabel}`}
                     </div>
                     <div style={{ color: '#5B6678', fontSize: '11.5px' }}>
                       {formatTanggal(order.created_at)}
-                      {order.driver?.nama ? ` Â· ${order.driver.nama}` : ''}
+                      {order.driver?.nama ? ` · ${order.driver.nama}` : ''}
                     </div>
                   </div>
 
@@ -323,7 +353,6 @@ export default function CustomerHistory() {
                   </Chip>
                 </div>
 
-                {/* Rute / Detail Barang */}
                 <div
                   style={{
                     display: 'flex',
@@ -343,13 +372,8 @@ export default function CustomerHistory() {
                       {order.nama_barang}
                     </div>
                   )}
-                  <div
-                    style={{
-                      display: 'flex',
-                      gap: '10px',
-                      alignItems: 'center',
-                    }}
-                  >
+
+                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
                     <span
                       style={{
                         width: '8px',
@@ -363,13 +387,8 @@ export default function CustomerHistory() {
                       {order.titik_jemput}
                     </span>
                   </div>
-                  <div
-                    style={{
-                      display: 'flex',
-                      gap: '10px',
-                      alignItems: 'center',
-                    }}
-                  >
+
+                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
                     <span
                       style={{
                         width: '8px',
@@ -387,7 +406,6 @@ export default function CustomerHistory() {
 
                 <div style={{ height: '1px', background: '#EEF0F3' }} />
 
-                {/* Total & Tombol Aksi */}
                 <div
                   style={{
                     display: 'flex',
@@ -454,7 +472,6 @@ export default function CustomerHistory() {
         )}
       </div>
 
-      {/* Bottom Navigation */}
       <BottomNav role="customer" />
     </div>
   );

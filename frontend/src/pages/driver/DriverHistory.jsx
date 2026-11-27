@@ -1,3 +1,4 @@
+
 import { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../api/axios';
@@ -8,8 +9,7 @@ import BottomNav from '../../components/BottomNav';
 const HISTORY_STATUSES = ['completed', 'cancelled'];
 
 function formatRibuan(value) {
-  const num = Number(value) || 0;
-  return num.toLocaleString('id-ID');
+  return (Number(value) || 0).toLocaleString('id-ID');
 }
 
 function formatTanggal(isoString) {
@@ -23,47 +23,79 @@ function formatTanggal(isoString) {
   });
 }
 
+function readCache(key) {
+  try {
+    const cached = JSON.parse(localStorage.getItem(key) || '[]');
+    return Array.isArray(cached) ? cached : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCache(key, data) {
+  try {
+    localStorage.setItem(key, JSON.stringify(data));
+  } catch (error) {
+    console.warn('Cache riwayat tidak dapat disimpan:', error);
+  }
+}
+
 export default function DriverHistory() {
   const { user } = useAuth();
-  const cacheKey = `anjemdips:history:driver:${user?.id || 'guest'}`;
+  const userId = user?.id;
+  const cacheKey = `anjemdips:history:driver:${userId || 'guest'}`;
 
-  const [orders, setOrders] = useState([]);
-  const [filter, setFilter] = useState('all'); // 'all' | 'completed' | 'cancelled'
+  const [orders, setOrders] = useState(() => readCache(cacheKey));
+  const [filter, setFilter] = useState('all');
   const [loading, setLoading] = useState(true);
 
   const fetchHistory = useCallback(async () => {
+    if (!userId) {
+      setOrders([]);
+      setLoading(false);
+      return;
+    }
+
+    // Tampilkan cache terlebih dahulu.
+    const cached = readCache(cacheKey);
+    setOrders(cached);
+    setLoading(false);
+
     try {
       const res = await api.get('/orders');
       const list = Array.isArray(res.data?.data) ? res.data.data : [];
+
       const driverHistory = list.filter(
         (item) =>
-          item.driver_id === user?.id &&
+          item.driver_id === userId &&
           HISTORY_STATUSES.includes(item.status)
       );
-      setOrders(driverHistory);
-      try {
-        localStorage.setItem(cacheKey, JSON.stringify(driverHistory));
-      } catch (storageError) {
-        console.warn('Cache riwayat tidak dapat disimpan:', storageError);
-      }
-    } catch {
-      try {
-        const cached = JSON.parse(localStorage.getItem(cacheKey) || '[]');
-        if (Array.isArray(cached)) setOrders(cached);
-        else setOrders([]);
-      } catch {
+
+      // Respons kosong tidak boleh menghapus cache yang sudah ada.
+      if (driverHistory.length > 0) {
+        setOrders(driverHistory);
+        saveCache(cacheKey, driverHistory);
+      } else if (cached.length > 0) {
+        setOrders(cached);
+      } else {
         setOrders([]);
       }
+    } catch (error) {
+      console.warn('Gagal mengambil riwayat dari server:', error);
+      setOrders(cached);
     } finally {
       setLoading(false);
     }
-  }, [user?.id, cacheKey]);
+  }, [userId, cacheKey]);
 
   useEffect(() => {
     fetchHistory();
   }, [fetchHistory]);
 
-  const completedOrders = orders.filter((item) => item.status === 'completed');
+  const completedOrders = orders.filter(
+    (item) => item.status === 'completed'
+  );
+
   const totalEarnings = completedOrders.reduce(
     (sum, item) => sum + (Number(item.ongkir) || 0),
     0
@@ -92,7 +124,6 @@ export default function DriverHistory() {
         color: '#0F172A',
       }}
     >
-      {/* Header */}
       <div style={{ padding: '20px 20px 0', flex: 'none' }}>
         <h1
           style={{
@@ -108,7 +139,6 @@ export default function DriverHistory() {
           Riwayat pengantaran dan total pendapatan.
         </div>
 
-        {/* Filter Tabs */}
         <div
           style={{
             display: 'flex',
@@ -149,7 +179,6 @@ export default function DriverHistory() {
         </div>
       </div>
 
-      {/* Konten Utama */}
       <div
         style={{
           flex: 1,
@@ -160,7 +189,6 @@ export default function DriverHistory() {
           overflowY: 'auto',
         }}
       >
-        {/* Kartu Ringkasan Pendapatan */}
         <Card
           variant="soft"
           style={{
@@ -231,7 +259,7 @@ export default function DriverHistory() {
                 >
                   <div>
                     <div style={{ fontWeight: 800 }}>
-                      {isJastip ? 'JasTip' : 'AnJem'} Â·{' '}
+                      {isJastip ? 'JasTip' : 'AnJem'} ·{' '}
                       {order.customer?.nama || 'Mahasiswa'}
                     </div>
                     <div style={{ color: '#5B6678', fontSize: '11.5px' }}>
@@ -250,13 +278,7 @@ export default function DriverHistory() {
                     gap: '6px',
                   }}
                 >
-                  <div
-                    style={{
-                      display: 'flex',
-                      gap: '8px',
-                      alignItems: 'center',
-                    }}
-                  >
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                     <span
                       style={{
                         width: '8px',
@@ -270,13 +292,7 @@ export default function DriverHistory() {
                       {order.titik_jemput}
                     </span>
                   </div>
-                  <div
-                    style={{
-                      display: 'flex',
-                      gap: '8px',
-                      alignItems: 'center',
-                    }}
-                  >
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                     <span
                       style={{
                         width: '8px',
@@ -320,7 +336,6 @@ export default function DriverHistory() {
         )}
       </div>
 
-      {/* Bottom Navigation */}
       <BottomNav role="driver" />
     </div>
   );
