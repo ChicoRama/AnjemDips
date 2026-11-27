@@ -1,0 +1,5767 @@
+﻿==================================================
+ SOURCE ANJEMDIPS - CANCEL, NOTIFIKASI, SPOT
+==================================================
+
+========================================
+FILE: backend\controllers\orderController.js
+========================================
+
+import supabase from '../config/supabase.js';
+import { checkDriverEligibility } from '../utils/driverEligibility.js';
+
+const ORDER_SELECT_QUERY = `
+  *,
+  customer:users!customer_id(id, nama, nim, no_wa),
+  driver:users!driver_id(id, nama, nim, no_wa, jenis_kendaraan, plat_nomor, kapasitas_penumpang, is_online)
+`;
+
+const MAX_ACTIVE_ORDERS_PER_CUSTOMER = 3;
+const PENDING_EXPIRE_MINUTES = 30;
+const JADWAL_EXPIRE_MINUTES = 30;
+const MAX_PENUMPANG = 8;
+const MIN_ONGKIR = 2000;
+const MAX_ONGKIR = 1000000;
+const ACTIVE_STATUSES = ['pending', 'accepted', 'on_progress'];
+
+const hasValue = (v) => v !== undefined && v !== null && String(v).trim() !== '';
+
+// Driver tidak boleh melihat kontak pemesan sebelum order diterima
+const hideCustomerContact = (order, user) => {
+  if (user.role === 'driver' && order.status === 'pending' && order.customer) {
+    return {
+      ...order,
+      customer: { ...order.customer, nim: null, no_wa: null },
+    };
+  }
+  return order;
+};
+
+// POST /api/orders (Customer membuat pesanan baru)
+export const createOrder = async (req, res) => {
+  try {
+    if (req.user.role !== 'customer') {
+      return res.status(403).json({
+        success: false,
+        message: 'Hanya akun dengan role Customer yang dapat membuat pesanan.',
+      });
+    }
+
+    const {
+      jenis_layanan,
+      titik_jemput,
+      titik_antar,
+      catatan,
+      ongkir,
+      jenis_kendaraan,
+      jumlah_penumpang,
+      waktu_berangkat,
+      jadwal_at,
+      nama_barang,
+      perkiraan_harga_barang,
+    } = req.body;
+
+    if (
+      !jenis_layanan ||
+      typeof titik_jemput !== 'string' ||
+      typeof titik_antar !== 'string' ||
+      titik_jemput.trim() === '' ||
+      titik_antar.trim() === ''
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'Jenis layanan, titik jemput, dan titik antar wajib diisi.',
+      });
+    }
+
+    if (!['anjem', 'jastip'].includes(jenis_layanan)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Jenis layanan harus berupa "anjem" atau "jastip".',
+      });
+    }
+
+    if (titik_jemput.trim().length > 200 || titik_antar.trim().length > 200) {
+      return res.status(400).json({
+        success: false,
+        message: 'Titik jemput/antar maksimal 200 karakter.',
+      });
+    }
+
+    if (typeof catatan === 'string' && catatan.trim().length > 500) {
+      return res.status(400).json({
+        success: false,
+        message: 'Catatan maksimal 500 karakter.',
+      });
+    }
+
+    // Jenis kendaraan (opsional)
+    let cleanJenisKendaraan = null;
+    if (hasValue(jenis_kendaraan)) {
+      const normalizedVehicle = String(jenis_kendaraan).trim().toLowerCase();
+      if (!['motor', 'mobil'].includes(normalizedVehicle)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Jenis kendaraan harus berupa "motor" atau "mobil".',
+        });
+      }
+      cleanJenisKendaraan = normalizedVehicle;
+    }
+
+    // Jumlah penumpang: hanya relevan untuk AnJem (JasTip tidak mengirimnya)
+    let cleanJumlahPenumpang = null;
+    if (jenis_layanan === 'anjem') {
+      if (hasValue(jumlah_penumpang)) {
+        const parsedPenumpang = Number(jumlah_penumpang);
+        if (!Number.isInteger(parsedPenumpang) || parsedPenumpang < 1) {
+          return res.status(400).json({
+            success: false,
+            message: 'Jumlah penumpang harus berupa angka minimal 1.',
+          });
+        }
+        cleanJumlahPenumpang = parsedPenumpang;
+      } else {
+        cleanJumlahPenumpang = 1;
+      }
+
+      if (cleanJenisKendaraan === 'motor' && cleanJumlahPenumpang > 1) {
+        return res.status(400).json({
+          success: false,
+          message: 'Motor hanya dapat mengangkut 1 penumpang.',
+        });
+      }
+
+      if (cleanJumlahPenumpang > MAX_PENUMPANG) {
+        return res.status(400).json({
+          success: false,
+          message: `Jumlah penumpang maksimal ${MAX_PENUMPANG} orang.`,
+        });
+      }
+    }
+
+    // Waktu berangkat
+    let cleanWaktuBerangkat = null;
+    if (hasValue(waktu_berangkat)) {
+      const normalizedWaktu = String(waktu_berangkat).trim().toLowerCase();
+      if (!['sekarang', 'jadwal'].includes(normalizedWaktu)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Waktu berangkat harus berupa "sekarang" atau "jadwal".',
+        });
+      }
+      cleanWaktuBerangkat = normalizedWaktu;
+    }
+
+    let cleanJadwalAt = null;
+    if (hasValue(jadwal_at)) {
+      const parsedDate = Date.parse(jadwal_at);
+      if (Number.isNaN(parsedDate)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Format waktu jadwal_at tidak valid.',
+        });
+      }
+      cleanJadwalAt = new Date(parsedDate).toISOString();
+    }
+
+    if (cleanWaktuBerangkat === 'jadwal') {
+      if (!cleanJadwalAt || Date.parse(cleanJadwalAt) < Date.now() - 60 * 1000) {
+        return res.status(400).json({
+          success: false,
+          message: 'Waktu jadwal harus diisi dan tidak boleh di masa lalu.',
+        });
+      }
+    }
+
+    const cleanNamaBarang = hasValue(nama_barang) ? String(nama_barang).trim() : null;
+
+    let cleanPerkiraanHargaBarang = null;
+    if (hasValue(perkiraan_harga_barang)) {
+      const parsedHargaBarang = Number(perkiraan_harga_barang);
+      if (Number.isNaN(parsedHargaBarang) || parsedHargaBarang < 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Perkiraan harga barang tidak valid.',
+        });
+      }
+      cleanPerkiraanHargaBarang = parsedHargaBarang;
+    }
+
+    // Ongkir wajib valid (tidak lagi diam-diam jadi 5000)
+    const parsedOngkir = Number(ongkir);
+    if (
+      !Number.isInteger(parsedOngkir) ||
+      parsedOngkir < MIN_ONGKIR ||
+      parsedOngkir > MAX_ONGKIR
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: `Ongkir harus berupa angka bulat antara Rp ${MIN_ONGKIR.toLocaleString('id-ID')} dan Rp ${MAX_ONGKIR.toLocaleString('id-ID')}.`,
+      });
+    }
+
+    // Batasi jumlah order aktif per pemesan (anti spam)
+    const { count: activeCount, error: countError } = await supabase
+      .from('orders')
+      .select('id', { count: 'exact', head: true })
+      .eq('customer_id', req.user.id)
+      .in('status', ACTIVE_STATUSES);
+
+    if (countError) throw countError;
+
+    if ((activeCount || 0) >= MAX_ACTIVE_ORDERS_PER_CUSTOMER) {
+      return res.status(400).json({
+        success: false,
+        message: `Maksimal ${MAX_ACTIVE_ORDERS_PER_CUSTOMER} pesanan aktif sekaligus. Selesaikan atau batalkan pesanan lain dulu.`,
+      });
+    }
+
+    const { data, error } = await supabase
+      .from('orders')
+      .insert([
+        {
+          customer_id: req.user.id,
+          jenis_layanan,
+          titik_jemput: titik_jemput.trim(),
+          titik_antar: titik_antar.trim(),
+          catatan: typeof catatan === 'string' ? catatan.trim() : '',
+          ongkir: parsedOngkir,
+          status: 'pending',
+          jenis_kendaraan: cleanJenisKendaraan,
+          jumlah_penumpang: cleanJumlahPenumpang,
+          waktu_berangkat: cleanWaktuBerangkat,
+          jadwal_at: cleanJadwalAt,
+          nama_barang: cleanNamaBarang,
+          perkiraan_harga_barang: cleanPerkiraanHargaBarang,
+        },
+      ])
+      .select(ORDER_SELECT_QUERY)
+      .single();
+
+    if (error) throw error;
+
+    return res.status(201).json({
+      success: true,
+      message: 'Pesanan berhasil dibuat! Menunggu driver mengambil order.',
+      data,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal membuat pesanan.',
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
+    });
+  }
+};
+
+// GET /api/orders (Customer melihat pesanannya; Driver melihat order pending + order miliknya)
+export const getOrders = async (req, res) => {
+  try {
+    // Order pending "Sekarang" yang tidak diambil siapa pun otomatis kedaluwarsa
+    try {
+      const cutoff = new Date(
+        Date.now() - PENDING_EXPIRE_MINUTES * 60 * 1000
+      ).toISOString();
+      await supabase
+        .from('orders')
+        .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+        .eq('status', 'pending')
+        .lt('created_at', cutoff)
+        .or('waktu_berangkat.is.null,waktu_berangkat.neq.jadwal');
+
+      // Order "Jadwal" kedaluwarsa bila waktunya sudah lewat > 30 menit dan belum diambil
+      const jadwalCutoff = new Date(
+        Date.now() - JADWAL_EXPIRE_MINUTES * 60 * 1000
+      ).toISOString();
+      await supabase
+        .from('orders')
+        .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+        .eq('status', 'pending')
+        .eq('waktu_berangkat', 'jadwal')
+        .lt('jadwal_at', jadwalCutoff);
+    } catch {
+      // Kegagalan housekeeping tidak boleh menggagalkan daftar order
+    }
+
+    let query = supabase
+      .from('orders')
+      .select(ORDER_SELECT_QUERY)
+      .order('created_at', { ascending: false });
+
+    if (req.user.role === 'customer') {
+      query = query.eq('customer_id', req.user.id);
+    } else if (req.user.role === 'driver') {
+      query = query.or(`status.eq.pending,driver_id.eq.${req.user.id}`);
+    }
+
+    const { data, error } = await query;
+
+    if (error) throw error;
+
+    return res.status(200).json({
+      success: true,
+      data: (data || []).map((order) => hideCustomerContact(order, req.user)),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal mengambil daftar pesanan.',
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
+    });
+  }
+};
+
+// PATCH /api/orders/:id/accept (Driver mengambil pesanan pending)
+export const acceptOrder = async (req, res) => {
+  try {
+    if (req.user.role !== 'driver') {
+      return res.status(403).json({
+        success: false,
+        message: 'Hanya akun dengan role Driver yang dapat mengambil pesanan.',
+      });
+    }
+
+    const { id } = req.params;
+
+    const { data: order, error: findError } = await supabase
+      .from('orders')
+      .select('id, status, driver_id, jenis_layanan, jenis_kendaraan, jumlah_penumpang')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (findError) throw findError;
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Pesanan tidak ditemukan.',
+      });
+    }
+
+    if (order.status !== 'pending' || order.driver_id) {
+      return res.status(409).json({
+        success: false,
+        message: 'Pesanan ini sudah diambil oleh driver lain atau tidak lagi tersedia.',
+      });
+    }
+
+    // Validasi: online, kendaraan lengkap & cocok, kapasitas cukup, tidak ada trip aktif
+    const eligibility = await checkDriverEligibility(req.user.id, order);
+    if (!eligibility.ok) {
+      return res.status(eligibility.status).json({
+        success: false,
+        message: eligibility.message,
+      });
+    }
+
+    // Update bersyarat untuk mencegah race condition antar driver
+    const { data, error } = await supabase
+      .from('orders')
+      .update({
+        driver_id: req.user.id,
+        status: 'accepted',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .eq('status', 'pending')
+      .is('driver_id', null)
+      .select(ORDER_SELECT_QUERY)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (!data) {
+      return res.status(409).json({
+        success: false,
+        message: 'Pesanan ini sudah diambil oleh driver lain atau tidak lagi tersedia.',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Pesanan berhasil diambil! Segera hubungi customer via WhatsApp.',
+      data,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal mengambil pesanan.',
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
+    });
+  }
+};
+
+// PATCH /api/orders/:id/status (Update status perjalanan / pembatalan)
+export const updateOrderStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const allowedStatuses = ['on_progress', 'completed', 'cancelled'];
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Status tidak valid. Pilihan: on_progress, completed, cancelled.',
+      });
+    }
+
+    const { data: order, error: findError } = await supabase
+      .from('orders')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (findError) throw findError;
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Pesanan tidak ditemukan.',
+      });
+    }
+
+    const ALLOWED_TRANSITIONS = {
+      accepted: ['on_progress', 'cancelled'],
+      on_progress: ['completed', 'cancelled'],
+      pending: ['cancelled'],
+    };
+
+    if (!(ALLOWED_TRANSITIONS[order.status] || []).includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Pesanan berstatus "${order.status}" tidak dapat diubah menjadi "${status}".`,
+      });
+    }
+
+    if (status === 'cancelled') {
+      // Pemesan boleh membatalkan selama belum mulai diantar (pending / accepted)
+      const isOwnerCustomer =
+        order.customer_id === req.user.id &&
+        ['pending', 'accepted'].includes(order.status);
+      const isAssignedDriver = order.driver_id === req.user.id;
+
+      if (!isOwnerCustomer && !isAssignedDriver) {
+        return res.status(403).json({
+          success: false,
+          message: 'Pesanan tidak dapat dibatalkan pada tahap ini.',
+        });
+      }
+    } else if (order.driver_id !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'Anda bukan driver yang bertugas untuk pesanan ini.',
+      });
+    }
+
+    const { data, error } = await supabase
+      .from('orders')
+      .update({
+        status,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .eq('status', order.status)
+      .select(ORDER_SELECT_QUERY)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (!data) {
+      return res.status(409).json({
+        success: false,
+        message: 'Status pesanan baru saja berubah. Muat ulang lalu coba lagi.',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Status pesanan diperbarui menjadi "${status}".`,
+      data,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal memperbarui status pesanan.',
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
+    });
+  }
+};
+
+// DELETE /api/orders/:id (Customer menghapus riwayat pesanan yang pending/cancelled)
+export const deleteOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: order, error: findError } = await supabase
+      .from('orders')
+      .select('id, customer_id, status')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (findError) throw findError;
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Pesanan tidak ditemukan.',
+      });
+    }
+
+    if (order.customer_id !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'Anda tidak berhak menghapus pesanan ini.',
+      });
+    }
+
+    if (!['pending', 'cancelled'].includes(order.status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Pesanan yang sedang berjalan atau sudah selesai tidak dapat dihapus.',
+      });
+    }
+
+    const { error } = await supabase.from('orders').delete().eq('id', id);
+
+    if (error) throw error;
+
+    return res.status(200).json({
+      success: true,
+      message: 'Pesanan berhasil dihapus.',
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal menghapus pesanan.',
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
+    });
+  }
+};
+
+
+========================================
+FILE: backend\controllers\offerController.js
+========================================
+
+import supabase from '../config/supabase.js';
+import { checkDriverEligibility } from '../utils/driverEligibility.js';
+
+const OFFER_SELECT_QUERY = `
+  *,
+  driver:users!driver_id(id, nama, nim, no_wa, jenis_kendaraan, plat_nomor, kapasitas_penumpang, is_online)
+`;
+
+const ORDER_SELECT_QUERY = `
+  *,
+  customer:users!customer_id(id, nama, nim, no_wa),
+  driver:users!driver_id(id, nama, nim, no_wa, jenis_kendaraan, plat_nomor, kapasitas_penumpang, is_online)
+`;
+
+const MIN_PRICE = 2000;
+const MAX_PRICE = 1000000;
+const MAX_PENUMPANG = 8;
+const MAX_NOTE_LENGTH = 200;
+
+const ORDER_FOR_OFFER_FIELDS =
+  'id, customer_id, status, jenis_layanan, jenis_kendaraan, jumlah_penumpang';
+
+// Kontak driver baru terlihat setelah tawaran disepakati
+// (sama seperti kontak pemesan yang disembunyikan dari driver sebelum order diterima)
+const sanitizeOffer = (offer) => {
+  if (!offer || !offer.driver || offer.status === 'accepted') return offer;
+  return {
+    ...offer,
+    driver: { ...offer.driver, nim: null, no_wa: null },
+  };
+};
+
+// GET /api/orders/:id/offers
+export const getOrderOffers = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: order, error: orderError } = await supabase
+      .from('orders')
+      .select('id, customer_id, driver_id, status')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (orderError) throw orderError;
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Pesanan tidak ditemukan.',
+      });
+    }
+
+    if (
+      req.user.role === 'customer' &&
+      order.customer_id !== req.user.id
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: 'Anda tidak berhak melihat tawaran untuk pesanan ini.',
+      });
+    }
+
+    let query = supabase
+      .from('offers')
+      .select(OFFER_SELECT_QUERY)
+      .eq('order_id', id)
+      .order('created_at', { ascending: false });
+
+    if (req.user.role === 'driver') {
+      query = query.eq('driver_id', req.user.id);
+    }
+
+    const { data, error } = await query;
+
+    if (error) throw error;
+
+    return res.status(200).json({
+      success: true,
+      data: (data || []).map(sanitizeOffer),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal mengambil daftar tawaran.',
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
+    });
+  }
+};
+
+// POST /api/orders/:id/offers
+export const createOrderOffer = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { offered_price, driver_id, adjusted_passengers, note } = req.body;
+
+    const parsedPrice = Number(offered_price);
+    if (
+      !Number.isInteger(parsedPrice) ||
+      parsedPrice < MIN_PRICE ||
+      parsedPrice > MAX_PRICE
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: `Nominal tawaran harus berupa angka bulat antara Rp ${MIN_PRICE.toLocaleString('id-ID')} dan Rp ${MAX_PRICE.toLocaleString('id-ID')}.`,
+      });
+    }
+
+    const cleanNote = note ? String(note).trim() : '';
+    if (cleanNote.length > MAX_NOTE_LENGTH) {
+      return res.status(400).json({
+        success: false,
+        message: `Catatan maksimal ${MAX_NOTE_LENGTH} karakter.`,
+      });
+    }
+
+    const { data: order, error: orderError } = await supabase
+      .from('orders')
+      .select(ORDER_FOR_OFFER_FIELDS)
+      .eq('id', id)
+      .maybeSingle();
+
+    if (orderError) throw orderError;
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Pesanan tidak ditemukan.',
+      });
+    }
+
+    if (order.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'Negosiasi hanya dapat dilakukan pada pesanan yang masih menunggu driver.',
+      });
+    }
+
+    const isDriver = req.user.role === 'driver';
+    const offeredBy = isDriver ? 'driver' : 'customer';
+    let targetDriverId = null;
+    let cleanPassengers = null;
+
+    // Penyesuaian jumlah penumpang hanya boleh dari pemesan, dan hanya untuk AnJem
+    if (
+      !isDriver &&
+      order.jenis_layanan === 'anjem' &&
+      adjusted_passengers !== undefined &&
+      adjusted_passengers !== null &&
+      adjusted_passengers !== ''
+    ) {
+      const parsedPax = Number(adjusted_passengers);
+      if (
+        !Number.isInteger(parsedPax) ||
+        parsedPax < 1 ||
+        parsedPax > MAX_PENUMPANG
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: `Jumlah penumpang harus antara 1 hingga ${MAX_PENUMPANG} orang.`,
+        });
+      }
+      cleanPassengers = parsedPax;
+    }
+
+    if (isDriver) {
+      targetDriverId = req.user.id;
+
+      // Driver wajib ON, punya data kendaraan, dan kendaraannya cocok.
+      // Kapasitas & trip aktif baru dicek saat tawaran disepakati.
+      const eligibility = await checkDriverEligibility(targetDriverId, order, {
+        skipCapacity: true,
+        skipActiveTrip: true,
+      });
+      if (!eligibility.ok) {
+        return res.status(eligibility.status).json({
+          success: false,
+          message: eligibility.message,
+        });
+      }
+    } else {
+      if (order.customer_id !== req.user.id) {
+        return res.status(403).json({
+          success: false,
+          message: 'Anda bukan pembuat pesanan ini.',
+        });
+      }
+
+      targetDriverId = driver_id;
+      if (!targetDriverId || typeof targetDriverId !== 'string') {
+        return res.status(400).json({
+          success: false,
+          message: 'driver_id wajib disertakan saat pemesan menawar balik.',
+        });
+      }
+
+      // Pemesan hanya boleh menawar balik ke driver yang sudah menawar lebih dulu
+      const { data: driverOffer, error: driverOfferError } = await supabase
+        .from('offers')
+        .select('id')
+        .eq('order_id', id)
+        .eq('driver_id', targetDriverId)
+        .eq('offered_by', 'driver')
+        .limit(1);
+
+      if (driverOfferError) throw driverOfferError;
+
+      if (!driverOffer || driverOffer.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Driver ini belum mengirim tawaran untuk pesananmu.',
+        });
+      }
+
+      const eligibility = await checkDriverEligibility(targetDriverId, order, {
+        passengers: cleanPassengers ?? order.jumlah_penumpang,
+        skipActiveTrip: true,
+      });
+      if (!eligibility.ok) {
+        return res.status(eligibility.status).json({
+          success: false,
+          message: eligibility.message,
+        });
+      }
+    }
+
+    const { data: createdOffer, error: insertError } = await supabase
+      .from('offers')
+      .insert([
+        {
+          order_id: id,
+          driver_id: targetDriverId,
+          offered_by: offeredBy,
+          offered_price: parsedPrice,
+          adjusted_passengers: cleanPassengers,
+          note: cleanNote || null,
+          status: 'pending',
+        },
+      ])
+      .select(OFFER_SELECT_QUERY)
+      .single();
+
+    if (insertError) throw insertError;
+
+    // Tandai tawaran pending sebelumnya (selain yang baru) sebagai superseded
+    await supabase
+      .from('offers')
+      .update({
+        status: 'superseded',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('order_id', id)
+      .eq('driver_id', targetDriverId)
+      .eq('status', 'pending')
+      .neq('id', createdOffer.id);
+
+    // Catatan: tabel orders TIDAK diubah saat tawar-menawar.
+    // Harga & jumlah penumpang final baru diterapkan ketika tawaran disepakati (accept).
+
+    return res.status(201).json({
+      success: true,
+      message: 'Penawaran harga berhasil dikirim.',
+      data: sanitizeOffer(createdOffer),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal mengirim penawaran harga.',
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
+    });
+  }
+};
+
+// PATCH /api/orders/:id/offers/:offerId/accept
+export const acceptOrderOffer = async (req, res) => {
+  try {
+    const { id, offerId } = req.params;
+
+    const { data: order, error: orderError } = await supabase
+      .from('orders')
+      .select(ORDER_FOR_OFFER_FIELDS)
+      .eq('id', id)
+      .maybeSingle();
+
+    if (orderError) throw orderError;
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Pesanan tidak ditemukan.',
+      });
+    }
+
+    if (order.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'Pesanan ini sudah diproses atau tidak lagi tersedia.',
+      });
+    }
+
+    const { data: offer, error: offerError } = await supabase
+      .from('offers')
+      .select('*')
+      .eq('id', offerId)
+      .eq('order_id', id)
+      .maybeSingle();
+
+    if (offerError) throw offerError;
+
+    if (!offer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tawaran tidak ditemukan.',
+      });
+    }
+
+    if (offer.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'Tawaran ini sudah tidak berlaku (sudah diproses atau digantikan).',
+      });
+    }
+
+    // Validasi: pihak yang menyetujui harus lawan dari pembuat tawaran
+    if (offer.offered_by === 'driver' && order.customer_id !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'Hanya pemesan yang dapat menyetujui tawaran driver.',
+      });
+    }
+
+    if (offer.offered_by === 'customer' && offer.driver_id !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'Hanya driver terkait yang dapat menyetujui tawaran pemesan.',
+      });
+    }
+
+    const finalPassengers =
+      order.jenis_layanan === 'anjem'
+        ? offer.adjusted_passengers || order.jumlah_penumpang
+        : order.jumlah_penumpang;
+
+    // Driver harus masih memenuhi syarat: ON, kendaraan cocok & muat, tidak ada trip aktif
+    const eligibility = await checkDriverEligibility(offer.driver_id, order, {
+      passengers: finalPassengers,
+    });
+    if (!eligibility.ok) {
+      const isDriverSelf = req.user.id === offer.driver_id;
+      return res.status(eligibility.status).json({
+        success: false,
+        message: isDriverSelf
+          ? eligibility.message
+          : 'Driver ini sedang tidak dapat menerima order (offline, kendaraan tidak sesuai, atau sedang menjalankan trip lain). Coba tawaran lain.',
+      });
+    }
+
+    // Proses penerimaan dijalankan dalam satu transaksi PostgreSQL melalui RPC.
+    // RPC mengunci baris order dan memperbarui order + seluruh status offer secara atomik.
+    const { data: acceptance, error: acceptanceError } = await supabase.rpc(
+      'accept_order_offer_atomic',
+      {
+        p_order_id: id,
+        p_offer_id: offerId,
+        p_actor_id: req.user.id,
+      }
+    );
+
+    if (acceptanceError) throw acceptanceError;
+
+    if (!acceptance?.success) {
+      return res.status(acceptance?.status || 409).json({
+        success: false,
+        message: acceptance?.message || 'Pesanan atau tawaran sudah berubah. Muat ulang lalu coba lagi.',
+      });
+    }
+
+    // Ambil ulang relasi customer/driver agar bentuk respons tetap sama seperti API sebelumnya.
+    const { data: updatedOrder, error: fetchUpdatedOrderError } = await supabase
+      .from('orders')
+      .select(ORDER_SELECT_QUERY)
+      .eq('id', id)
+      .single();
+
+    if (fetchUpdatedOrderError) throw fetchUpdatedOrderError;
+
+    return res.status(200).json({
+      success: true,
+      message: 'Tawaran disepakati! Pesanan kini aktif.',
+      data: updatedOrder,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal menyetujui tawaran.',
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
+    });
+  }
+};
+
+// PATCH /api/orders/:id/offers/:offerId/reject
+export const rejectOrderOffer = async (req, res) => {
+  try {
+    const { id, offerId } = req.params;
+
+    const { data: order, error: orderError } = await supabase
+      .from('orders')
+      .select('id, customer_id, status')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (orderError) throw orderError;
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Pesanan tidak ditemukan.',
+      });
+    }
+
+    if (order.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'Pesanan ini sudah diproses atau tidak lagi tersedia.',
+      });
+    }
+
+    const { data: offer, error: offerError } = await supabase
+      .from('offers')
+      .select('id, order_id, driver_id, offered_by, status')
+      .eq('id', offerId)
+      .eq('order_id', id)
+      .maybeSingle();
+
+    if (offerError) throw offerError;
+
+    if (!offer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tawaran tidak ditemukan.',
+      });
+    }
+
+    if (offer.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'Tawaran ini sudah tidak berlaku (sudah diproses atau digantikan).',
+      });
+    }
+
+    // Yang boleh menolak adalah lawan dari pembuat tawaran
+    const isAllowed =
+      (offer.offered_by === 'driver' && order.customer_id === req.user.id) ||
+      (offer.offered_by === 'customer' && offer.driver_id === req.user.id);
+
+    if (!isAllowed) {
+      return res.status(403).json({
+        success: false,
+        message: 'Anda tidak berhak menolak tawaran ini.',
+      });
+    }
+
+    const { data: rejected, error: rejectError } = await supabase
+      .from('offers')
+      .update({ status: 'rejected', updated_at: new Date().toISOString() })
+      .eq('id', offerId)
+      .eq('status', 'pending')
+      .select(OFFER_SELECT_QUERY)
+      .maybeSingle();
+
+    if (rejectError) throw rejectError;
+
+    if (!rejected) {
+      return res.status(409).json({
+        success: false,
+        message: 'Tawaran ini baru saja berubah. Muat ulang lalu coba lagi.',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Tawaran ditolak.',
+      data: sanitizeOffer(rejected),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal menolak tawaran.',
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
+    });
+  }
+};
+
+
+========================================
+FILE: backend\routes\orderRoutes.js
+========================================
+
+import express from 'express';
+import {
+  createOrder,
+  getOrders,
+  acceptOrder,
+  updateOrderStatus,
+  deleteOrder,
+} from '../controllers/orderController.js';
+import {
+  getOrderOffers,
+  createOrderOffer,
+  acceptOrderOffer,
+  rejectOrderOffer,
+} from '../controllers/offerController.js';
+import authMiddleware from '../middleware/authMiddleware.js';
+
+const router = express.Router();
+
+router.use(authMiddleware);
+
+router.post('/', createOrder);
+router.get('/', getOrders);
+router.patch('/:id/accept', acceptOrder);
+router.patch('/:id/status', updateOrderStatus);
+router.delete('/:id', deleteOrder);
+
+// Negosiasi & Tawaran Harga
+router.get('/:id/offers', getOrderOffers);
+router.post('/:id/offers', createOrderOffer);
+router.patch('/:id/offers/:offerId/accept', acceptOrderOffer);
+router.patch('/:id/offers/:offerId/reject', rejectOrderOffer);
+
+export default router;
+
+
+
+
+========================================
+FILE: backend\controllers\spotController.js
+========================================
+
+import supabase from '../config/supabase.js';
+
+// GET /api/spots
+export const getAllSpots = async (req, res) => {
+  try {
+    const { kategori } = req.query;
+
+    let query = supabase
+      .from('spots')
+      .select('*')
+      .order('kategori', { ascending: true })
+      .order('nama_lokasi', { ascending: true });
+
+    if (kategori) {
+      query = query.eq('kategori', kategori);
+    }
+
+    const { data, error } = await query;
+
+    if (error) throw error;
+
+    return res.status(200).json({
+      success: true,
+      data,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal mengambil data lokasi spots.',
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
+    });
+  }
+};
+
+
+
+========================================
+FILE: backend\routes\spotRoutes.js
+========================================
+
+import express from 'express';
+import { getAllSpots } from '../controllers/spotController.js';
+
+const router = express.Router();
+
+router.get('/', getAllSpots);
+
+export default router;
+
+
+
+========================================
+FILE: frontend\src\pages\customer\CustomerPesanan.jsx
+========================================
+
+import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import api from '../../api/axios';
+import Card from '../../components/Card';
+import Chip from '../../components/Chip';
+import BottomNav from '../../components/BottomNav';
+import { waktuLabel } from '../../utils/format';
+
+const ACTIVE_STATUSES = [
+  'pending',
+  'accepted',
+  'on_progress',
+  'on_the_way',
+  'in_progress',
+];
+
+function formatRibuan(value) {
+  const num = Number(value) || 0;
+  return num.toLocaleString('id-ID');
+}
+
+function formatWaUrl(phone, text) {
+  if (!phone) return null;
+  let cleaned = String(phone).replace(/\D/g, '');
+  if (cleaned.startsWith('0')) {
+    cleaned = `62${cleaned.slice(1)}`;
+  }
+  return `https://wa.me/${cleaned}?text=${encodeURIComponent(text)}`;
+}
+
+export default function CustomerPesanan() {
+  const [orders, setOrders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [cancellingId, setCancellingId] = useState(null);
+  const [error, setError] = useState('');
+
+  const fetchActiveOrders = useCallback(async () => {
+    try {
+      const res = await api.get('/orders');
+      const list = Array.isArray(res.data?.data) ? res.data.data : [];
+      const activeList = list.filter((item) =>
+        ACTIVE_STATUSES.includes(item.status)
+      );
+      setOrders(activeList);
+      setError('');
+    } catch {
+      setError('Koneksi terputus. Menampilkan data pesanan terakhir yang berhasil dimuat.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchActiveOrders();
+    const interval = setInterval(fetchActiveOrders, 5000);
+    return () => clearInterval(interval);
+  }, [fetchActiveOrders]);
+
+  const handleCancelOrder = async (orderId) => {
+    setError('');
+    setCancellingId(orderId);
+    try {
+      await api.patch(`/orders/${orderId}/status`, {
+        status: 'cancelled',
+      });
+      await fetchActiveOrders();
+    } catch (err) {
+      setError(
+        err.response?.data?.message || 'Gagal membatalkan pesanan.'
+      );
+    } finally {
+      setCancellingId(null);
+    }
+  };
+
+  return (
+    <div
+      className="pwa-shell"
+      style={{
+        height: '844px',
+        minHeight: '844px',
+        boxSizing: 'border-box',
+        background: '#F5F6F8',
+        position: 'relative',
+        overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+        fontSize: '13px',
+        lineHeight: 1.4,
+        color: '#0F172A',
+      }}
+    >
+      {/* Header */}
+      <div style={{ padding: '20px 20px 0', flex: 'none' }}>
+        <h1
+          style={{
+            fontSize: '20px',
+            fontWeight: 800,
+            letterSpacing: '-.02em',
+            margin: 0,
+          }}
+        >
+          Pesanan
+        </h1>
+        <div style={{ color: '#5B6678', marginTop: '2px' }}>
+          Pesanan yang sedang berjalan.
+        </div>
+      </div>
+
+      {/* Daftar Pesanan Aktif */}
+      <div
+        style={{
+          flex: 1,
+          padding: '16px 20px 84px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '12px',
+          overflowY: 'auto',
+        }}
+      >
+        {error && (
+          <div
+            role="alert"
+            style={{
+              borderRadius: '12px',
+              background: '#FEF2F2',
+              padding: '8px 12px',
+              fontSize: '12px',
+              fontWeight: 600,
+              color: '#B91C1C',
+            }}
+          >
+            {error}
+          </div>
+        )}
+
+        {loading ? (
+          <Card style={{ textAlign: 'center', color: '#5B6678' }}>
+            Memuat pesanan...
+          </Card>
+        ) : orders.length === 0 ? (
+          <Card
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              textAlign: 'center',
+              gap: '8px',
+              padding: '22px 16px',
+            }}
+          >
+            <div style={{ fontWeight: 800, fontSize: '15px' }}>
+              Belum ada pesanan aktif
+            </div>
+            <div style={{ color: '#5B6678', fontSize: '12px' }}>
+              Pesanan AnJem atau JasTip yang sedang berjalan akan tampil di
+              sini.
+            </div>
+            <Link
+              to="/customer/anjem"
+              style={{
+                marginTop: '6px',
+                height: '40px',
+                padding: '0 18px',
+                borderRadius: '12px',
+                background: '#0F766E',
+                color: '#fff',
+                fontWeight: 700,
+                fontSize: '13px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                textDecoration: 'none',
+              }}
+            >
+              Buat pesanan
+            </Link>
+          </Card>
+        ) : (
+          orders.map((order) => {
+            const isJastip = order.jenis_layanan === 'jastip';
+            const isMotor = order.jenis_kendaraan === 'motor';
+            const vehicleLabel = isMotor ? 'Motor' : 'Mobil';
+            const isPending = order.status === 'pending';
+            const isOnWay = [
+              'on_progress',
+              'on_the_way',
+              'in_progress',
+            ].includes(order.status);
+
+            const hargaBarang = Number(order.perkiraan_harga_barang) || 0;
+            const ongkir = Number(order.ongkir) || 0;
+            const totalHarga = isJastip ? hargaBarang + ongkir : ongkir;
+
+            // Tampilan kartu pesanan yang masih menunggu driver (pending)
+            if (isPending) {
+              return (
+                <Card
+                  key={order.id}
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '12px',
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '10px',
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: '38px',
+                        height: '38px',
+                        borderRadius: '12px',
+                        background: isJastip ? '#FDE9B8' : '#E6F4F2',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: isJastip ? '#6B4308' : '#0F766E',
+                        flex: 'none',
+                      }}
+                    >
+                      {isJastip ? (
+                        <svg
+                          width="20"
+                          height="20"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <path d="M5 8h14l-1 12H6z" />
+                          <path d="M9 8a3 3 0 0 1 6 0" />
+                        </svg>
+                      ) : isMotor ? (
+                        <svg
+                          width="20"
+                          height="20"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <circle cx="6" cy="16" r="3" />
+                          <circle cx="18" cy="16" r="3" />
+                          <path d="M6 16l4-7h5l3 7M9 9H7" />
+                        </svg>
+                      ) : (
+                        <svg
+                          width="20"
+                          height="20"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <path d="M4 16v-4l2-5h12l2 5v4zM4 16v3M20 16v3" />
+                        </svg>
+                      )}
+                    </div>
+
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 800 }}>
+                        {isJastip ? 'JasTip' : `AnJem Â· ${vehicleLabel}`}
+                      </div>
+                      <div
+                        style={{
+                          color: '#5B6678',
+                          fontSize: '12px',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                        }}
+                      >
+                        {isJastip
+                          ? order.nama_barang ||
+                            `${order.titik_jemput} â†’ ${order.titik_antar}`
+                          : `${order.titik_jemput} â†’ ${order.titik_antar}`}
+                      </div>
+                    </div>
+
+                    <Chip variant="warning">Menunggu driver</Chip>
+                  </div>
+
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <span style={{ color: '#5B6678' }}>
+                      {isJastip
+                        ? hargaBarang > 0
+                          ? `Barang Rp ${formatRibuan(hargaBarang)} + upah Rp ${formatRibuan(ongkir)}`
+                          : `Upah Rp ${formatRibuan(ongkir)}`
+                        : `${order.jumlah_penumpang || 1} penumpang Â· ${waktuLabel(order)}`}
+                    </span>
+                    <span style={{ fontWeight: 800 }}>
+                      Rp {formatRibuan(totalHarga)}
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '10px' }}>
+                    <Link
+                      to="/customer/tawaran"
+                      state={{ order }}
+                      style={{
+                        flex: 1,
+                        height: '44px',
+                        borderRadius: '12px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontWeight: 700,
+                        fontSize: '13px',
+                        textDecoration: 'none',
+                        boxSizing: 'border-box',
+                        background: '#0F766E',
+                        color: '#fff',
+                      }}
+                    >
+                      Lihat tawaran
+                    </Link>
+                  <button
+                    type="button"
+                    disabled={cancellingId === order.id}
+                    onClick={() => handleCancelOrder(order.id)}
+                    style={{
+                      height: '44px',
+                      borderRadius: '12px',
+                      border: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      font: "700 13px 'Plus Jakarta Sans',system-ui,sans-serif",
+                      textDecoration: 'none',
+                      boxSizing: 'border-box',
+                      background: '#fff',
+                      color: '#B91C1C',
+                      boxShadow: 'inset 0 0 0 1.5px #F3C4C4',
+                      flex: 1,
+                      cursor:
+                        cancellingId === order.id ? 'not-allowed' : 'pointer',
+                      opacity: cancellingId === order.id ? 0.6 : 1,
+                    }}
+                  >
+                    {cancellingId === order.id
+                      ? 'Membatalkan...'
+                      : 'Batalkan pesanan'}
+                  </button>
+                  </div>
+                </Card>
+              );
+            }
+
+            // Tampilan kartu pesanan aktif yang sudah diterima driver
+            const driverName = order.driver?.nama || 'Driver';
+            const driverPlat = order.driver?.plat_nomor;
+            const driverWa = formatWaUrl(
+              order.driver?.no_wa,
+              `Halo kak ${driverName}, saya pemesan AnjemDips.`
+            );
+
+            return (
+              <Card
+                key={order.id}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '12px',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                  }}
+                >
+                  <div
+                    style={{
+                      width: '38px',
+                      height: '38px',
+                      borderRadius: '12px',
+                      background: isJastip ? '#FDE9B8' : '#E6F4F2',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: isJastip ? '#6B4308' : '#0F766E',
+                      flex: 'none',
+                    }}
+                  >
+                    {isJastip ? (
+                      <svg
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M5 8h14l-1 12H6z" />
+                        <path d="M9 8a3 3 0 0 1 6 0" />
+                      </svg>
+                    ) : isMotor ? (
+                      <svg
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <circle cx="6" cy="16" r="3" />
+                        <circle cx="18" cy="16" r="3" />
+                        <path d="M6 16l4-7h5l3 7M9 9H7" />
+                      </svg>
+                    ) : (
+                      <svg
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M4 16v-4l2-5h12l2 5v4zM4 16v3M20 16v3" />
+                      </svg>
+                    )}
+                  </div>
+
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 800 }}>
+                      {isJastip ? 'JasTip' : `AnJem Â· ${vehicleLabel}`}
+                    </div>
+                    <div style={{ color: '#5B6678', fontSize: '12px' }}>
+                      {isJastip && order.nama_barang
+                        ? order.nama_barang
+                        : order.waktu_berangkat === 'jadwal'
+                        ? waktuLabel(order)
+                        : 'Hari ini Â· Berangkat sekarang'}
+                    </div>
+                  </div>
+
+                  <Chip variant="teal">
+                    {isOnWay ? 'Di jalan' : 'Menjemput'}
+                  </Chip>
+                </div>
+
+                {/* Rute Jemput & Tujuan */}
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '8px',
+                    paddingLeft: '2px',
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      gap: '10px',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: '10px',
+                        height: '10px',
+                        borderRadius: '99px',
+                        background: '#0F766E',
+                        flex: 'none',
+                      }}
+                    />
+                    <span style={{ fontWeight: 600 }}>
+                      {order.titik_jemput}
+                    </span>
+                  </div>
+
+                  <div
+                    style={{
+                      display: 'flex',
+                      gap: '10px',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: '10px',
+                        height: '10px',
+                        borderRadius: '3px',
+                        background: '#F59E0B',
+                        flex: 'none',
+                      }}
+                    />
+                    <span style={{ fontWeight: 600 }}>
+                      {order.titik_antar}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Progress Bar 4 Tahap */}
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: '6px',
+                    alignItems: 'center',
+                  }}
+                >
+                  <div
+                    style={{
+                      flex: 1,
+                      height: '4px',
+                      borderRadius: '4px',
+                      background: '#0F766E',
+                    }}
+                  />
+                  <div
+                    style={{
+                      flex: 1,
+                      height: '4px',
+                      borderRadius: '4px',
+                      background: '#0F766E',
+                    }}
+                  />
+                  <div
+                    style={{
+                      flex: 1,
+                      height: '4px',
+                      borderRadius: '4px',
+                      background: isOnWay ? '#0F766E' : '#E2E6EB',
+                    }}
+                  />
+                  <div
+                    style={{
+                      flex: 1,
+                      height: '4px',
+                      borderRadius: '4px',
+                      background: '#E2E6EB',
+                    }}
+                  />
+                </div>
+
+                <div
+                  style={{
+                    color: '#5B6678',
+                    fontSize: '11.5px',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                  }}
+                >
+                  <span>Diterima</span>
+                  <span
+                    style={
+                      !isOnWay
+                        ? { color: '#0F766E', fontWeight: 700 }
+                        : undefined
+                    }
+                  >
+                    Menjemput
+                  </span>
+                  <span
+                    style={
+                      isOnWay
+                        ? { color: '#0F766E', fontWeight: 700 }
+                        : undefined
+                    }
+                  >
+                    Di jalan
+                  </span>
+                  <span>Selesai</span>
+                </div>
+
+                {/* Driver & Harga */}
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}
+                >
+                  <span style={{ color: '#5B6678' }}>
+                    {driverName}
+                    {driverPlat ? ` Â· ${driverPlat}` : ''}
+                  </span>
+                  <span style={{ fontWeight: 800 }}>
+                    Rp {formatRibuan(totalHarga)}
+                  </span>
+                </div>
+
+                {/* Tombol Aksi */}
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <Link
+                    to="/customer/lacak"
+                    state={{ order }}
+                    style={{
+                      height: '44px',
+                      borderRadius: '12px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontWeight: 700,
+                      fontSize: '13px',
+                      textDecoration: 'none',
+                      boxSizing: 'border-box',
+                      flex: 1,
+                      background: '#0F766E',
+                      color: '#fff',
+                    }}
+                  >
+                    Lacak driver
+                  </Link>
+
+                  {driverWa ? (
+                    <a
+                      href={driverWa}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{
+                        height: '44px',
+                        borderRadius: '12px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontWeight: 700,
+                        fontSize: '13px',
+                        textDecoration: 'none',
+                        boxSizing: 'border-box',
+                        flex: 1,
+                        background: '#fff',
+                        color: '#0F172A',
+                        boxShadow: 'inset 0 0 0 1.5px #D5DAE1',
+                      }}
+                    >
+                      Hubungi
+                    </a>
+                  ) : (
+                    <span
+                      aria-disabled="true"
+                      style={{
+                        opacity: 0.5,
+                        height: '44px',
+                        borderRadius: '12px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontWeight: 700,
+                        fontSize: '13px',
+                        textDecoration: 'none',
+                        boxSizing: 'border-box',
+                        flex: 1,
+                        background: '#fff',
+                        color: '#0F172A',
+                        boxShadow: 'inset 0 0 0 1.5px #D5DAE1',
+                      }}
+                    >
+                      Hubungi
+                    </span>
+                  )}
+                </div>
+              </Card>
+            );
+          })
+        )}
+      </div>
+
+      {/* Bottom Navigation */}
+      <BottomNav role="customer" />
+    </div>
+  );
+}
+
+
+========================================
+FILE: frontend\src\pages\customer\CustomerMencari.jsx
+========================================
+
+import { useEffect, useState } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import api from '../../api/axios';
+import Button from '../../components/Button';
+import { waktuLabel } from '../../utils/format';
+
+function formatRibuan(value) {
+  const num = Number(value) || 0;
+  return num.toLocaleString('id-ID');
+}
+
+export default function CustomerMencari() {
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  const [order, setOrder] = useState(() => location.state?.order || null);
+  const [cancelling, setCancelling] = useState(false);
+  const [error, setError] = useState('');
+  const [offerCount, setOfferCount] = useState(0);
+
+  // Ambil order pending terbaru jika halaman dibuka langsung / di-refresh,
+  // sekaligus pantau berkala jika driver sudah menerima pesanan
+  useEffect(() => {
+    let isMounted = true;
+
+    const syncOrder = async () => {
+      try {
+        const res = await api.get('/orders');
+        const list = Array.isArray(res.data?.data) ? res.data.data : [];
+
+        const target = order?.id
+          ? list.find((item) => item.id === order.id)
+          : list.find((item) => item.status === 'pending');
+
+        if (!isMounted || !target) return;
+
+        setOrder(target);
+
+        if (target.status === 'pending') {
+          try {
+            const offersRes = await api.get(`/orders/${target.id}/offers`);
+            const offerList = Array.isArray(offersRes.data?.data)
+              ? offersRes.data.data
+              : [];
+            if (isMounted) {
+              setOfferCount(
+                offerList.filter(
+                  (o) => o.offered_by === 'driver' && o.status === 'pending'
+                ).length
+              );
+            }
+          } catch {
+            // Abaikan error jaringan sementara saat memuat tawaran
+          }
+        }
+
+        if (
+          ['accepted', 'on_progress', 'on_the_way', 'in_progress'].includes(
+            target.status
+          )
+        ) {
+          navigate('/customer/lacak', {
+            replace: true,
+            state: { order: target },
+          });
+        }
+      } catch {
+        // Abaikan error jaringan sementara saat polling
+      }
+    };
+
+    syncOrder();
+    const interval = setInterval(syncOrder, 5000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [order?.id, navigate]);
+
+  const isJastip = order?.jenis_layanan === 'jastip';
+  const backPath = isJastip ? '/customer/jastip' : '/customer/anjem';
+
+  const vehicleLabel =
+    order?.jenis_kendaraan === 'motor' ? 'Motor' : 'Mobil';
+  const penumpangCount = order?.jumlah_penumpang || 1;
+  const waktuText = waktuLabel(order);
+
+  const handleCancel = async () => {
+    if (!order?.id) {
+      navigate(backPath);
+      return;
+    }
+
+    setError('');
+    setCancelling(true);
+    try {
+      await api.patch(`/orders/${order.id}/status`, {
+        status: 'cancelled',
+      });
+      navigate(backPath);
+    } catch (err) {
+      setError(
+        err.response?.data?.message || 'Gagal membatalkan pesanan.'
+      );
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  return (
+    <div
+      className="pwa-shell"
+      style={{
+        height: '844px',
+        minHeight: '844px',
+        boxSizing: 'border-box',
+        background: '#E9EEF0',
+        position: 'relative',
+        overflow: 'hidden',
+        fontSize: '13px',
+        lineHeight: 1.4,
+        color: '#0F172A',
+      }}
+    >
+      {/* Peta Radar Latar */}
+      <svg
+        width="390"
+        height="560"
+        viewBox="0 0 390 560"
+        fill="none"
+        aria-hidden="true"
+        style={{ position: 'absolute', left: 0, top: 0 }}
+      >
+        <path
+          d="M-10 420 C90 380 140 300 220 320 S350 380 400 260"
+          stroke="#fff"
+          strokeWidth="16"
+          strokeLinecap="round"
+        />
+        <path
+          d="M120 -10 C150 100 100 200 160 330 S220 480 200 570"
+          stroke="#fff"
+          strokeWidth="10"
+          strokeLinecap="round"
+        />
+        <path d="M-10 150 L400 110" stroke="#fff" strokeWidth="9" />
+        <path
+          d="M270 -10 C290 60 250 140 300 250"
+          stroke="#fff"
+          strokeWidth="7"
+        />
+        <rect x="300" y="330" width="70" height="60" rx="10" fill="#DDE7E4" />
+        <rect x="20" y="200" width="70" height="80" rx="10" fill="#DDE7E4" />
+        <circle cx="195" cy="300" r="130" fill="#0F766E" fillOpacity=".07" />
+        <circle cx="195" cy="300" r="88" fill="#0F766E" fillOpacity=".1" />
+        <circle cx="195" cy="300" r="48" fill="#0F766E" fillOpacity=".16" />
+        <circle
+          cx="195"
+          cy="300"
+          r="12"
+          fill="#0F766E"
+          stroke="#fff"
+          strokeWidth="4"
+        />
+        <circle
+          cx="260"
+          cy="240"
+          r="7"
+          fill="#fff"
+          stroke="#5B6678"
+          strokeWidth="2"
+        />
+        <circle
+          cx="130"
+          cy="350"
+          r="7"
+          fill="#fff"
+          stroke="#5B6678"
+          strokeWidth="2"
+        />
+        <circle
+          cx="230"
+          cy="380"
+          r="7"
+          fill="#fff"
+          stroke="#5B6678"
+          strokeWidth="2"
+        />
+      </svg>
+
+      {/* Tombol Kembali Mengambang */}
+      <Link
+        to={backPath}
+        aria-label="Kembali"
+        style={{
+          position: 'absolute',
+          left: '16px',
+          top: '16px',
+          width: '44px',
+          height: '44px',
+          borderRadius: '14px',
+          background: '#fff',
+          boxShadow: '0 2px 8px rgba(15,23,42,.12)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: '#0F172A',
+        }}
+      >
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M15 5l-7 7 7 7" />
+        </svg>
+      </Link>
+
+      {/* Bottom Sheet Status Pencarian */}
+      <div
+        style={{
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: '#fff',
+          borderRadius: '28px 28px 0 0',
+          padding: '12px 20px 20px',
+          boxShadow: '0 -8px 30px rgba(15,23,42,.1)',
+        }}
+      >
+        <div
+          style={{
+            width: '40px',
+            height: '4px',
+            borderRadius: '4px',
+            background: '#D5DAE1',
+            margin: '0 auto 16px',
+          }}
+        />
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div
+            style={{
+              width: '44px',
+              height: '44px',
+              borderRadius: '99px',
+              background: '#E6F4F2',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flex: 'none',
+            }}
+          >
+            <svg
+              width="22"
+              height="22"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="#0F766E"
+              strokeWidth="2"
+              strokeLinecap="round"
+              aria-hidden="true"
+              className="animate-spin"
+            >
+              <path d="M21 12a9 9 0 1 1-6.2-8.55" />
+            </svg>
+          </div>
+          <div>
+            <div
+              style={{
+                fontWeight: 800,
+                fontSize: '17px',
+                letterSpacing: '-.01em',
+              }}
+            >
+              Mencari driverâ€¦
+            </div>
+            <div style={{ color: '#5B6678' }}>
+              {isJastip
+                ? 'Permintaanmu dikirim ke driver JasTip yang aktif di sekitarmu.'
+                : `Permintaanmu dikirim ke driver ${vehicleLabel} yang aktif di sekitarmu.`}
+            </div>
+          </div>
+        </div>
+
+        {/* Kartu Ringkasan Rute & Harga */}
+        <div
+          style={{
+            marginTop: '16px',
+            background: '#F5F6F8',
+            borderRadius: '16px',
+            padding: '14px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '10px',
+          }}
+        >
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <span
+              style={{
+                width: '10px',
+                height: '10px',
+                borderRadius: '99px',
+                background: '#0F766E',
+                flex: 'none',
+              }}
+            />
+            <span style={{ fontWeight: 600 }}>
+              {order?.titik_jemput || 'Titik jemput'}
+            </span>
+          </div>
+
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <span
+              style={{
+                width: '10px',
+                height: '10px',
+                borderRadius: '3px',
+                background: '#F59E0B',
+                flex: 'none',
+              }}
+            />
+            <span style={{ fontWeight: 600 }}>
+              {order?.titik_antar || 'Tujuan'}
+            </span>
+          </div>
+
+          <div style={{ height: '1px', background: '#E2E6EB' }} />
+
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: '#5B6678' }}>
+              {isJastip
+                ? `JasTip Â· ${order?.nama_barang || 'Titip barang'} Â· ${waktuText}`
+                : `${vehicleLabel} Â· ${penumpangCount} penumpang Â· ${waktuText}`}
+            </span>
+            <span style={{ fontWeight: 800 }}>
+              Rp {formatRibuan(order?.ongkir ?? 15000)}
+            </span>
+          </div>
+        </div>
+
+        <div
+          style={{
+            color: '#5B6678',
+            fontSize: '12px',
+            marginTop: '12px',
+            textAlign: 'center',
+          }}
+        >
+          Biasanya 1â€“2 menit. Kamu akan melihat tawaran begitu driver menjawab.
+        </div>
+
+        {error && (
+          <div
+            role="alert"
+            style={{
+              marginTop: '10px',
+              borderRadius: '12px',
+              background: '#FEF2F2',
+              padding: '8px 12px',
+              fontSize: '12px',
+              fontWeight: 600,
+              color: '#B91C1C',
+              textAlign: 'center',
+            }}
+          >
+            {error}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: '10px', marginTop: '14px' }}>
+          <Button
+            type="button"
+            variant="dangerOutline"
+            disabled={cancelling}
+            onClick={handleCancel}
+            style={{ flex: 1 }}
+          >
+            {cancelling ? 'Membatalkan...' : 'Batalkan'}
+          </Button>
+          <Button
+            to="/customer/tawaran"
+            state={order ? { order } : undefined}
+            variant="primary"
+            disabled={offerCount === 0}
+            style={{ flex: 1 }}
+          >
+            {offerCount > 0
+              ? `Lihat tawaran (${offerCount})`
+              : 'Belum ada tawaran'}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+========================================
+FILE: frontend\src\pages\driver\DriverRequestDetail.jsx
+========================================
+
+import { useEffect, useState } from 'react';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useAuth } from '../../context/AuthContext';
+import api from '../../api/axios';
+import Card from '../../components/Card';
+import Chip from '../../components/Chip';
+import Button from '../../components/Button';
+import { getDriverVehicleProfile } from '../../mocks/driverMocks';
+
+function formatRibuan(value) {
+  const num = Number(value) || 0;
+  return num.toLocaleString('id-ID');
+}
+
+export default function DriverRequestDetail() {
+  const { id } = useParams();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { user } = useAuth();
+
+  const [order, setOrder] = useState(() => location.state?.order || null);
+  const [loading, setLoading] = useState(!location.state?.order);
+  const [accepting, setAccepting] = useState(false);
+  const [error, setError] = useState('');
+  const [customerOffer, setCustomerOffer] = useState(null);
+  const [acceptingOffer, setAcceptingOffer] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadOrder = async () => {
+      try {
+        const res = await api.get('/orders');
+        const list = Array.isArray(res.data?.data) ? res.data.data : [];
+        const found = list.find((item) => String(item.id) === String(id));
+        if (isMounted && found) {
+          setOrder(found);
+        }
+      } catch {
+        // Gunakan state yang sudah diteruskan jika jaringan lambat
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    loadOrder();
+    const interval = setInterval(loadOrder, 3000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [id]);
+
+  // Pantau tawaran balik dari pemesan
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadOffers = async () => {
+      try {
+        const res = await api.get(`/orders/${id}/offers`);
+        const list = Array.isArray(res.data?.data) ? res.data.data : [];
+        const latest = list[0];
+        if (isMounted) {
+          setCustomerOffer(
+            latest &&
+              latest.offered_by === 'customer' &&
+              latest.status === 'pending'
+              ? latest
+              : null
+          );
+        }
+      } catch {
+        // Abaikan gangguan jaringan sementara
+      }
+    };
+
+    loadOffers();
+    const interval = setInterval(loadOffers, 5000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [id]);
+
+  const vehicle = getDriverVehicleProfile(user);
+  const isJastip = order?.jenis_layanan === 'jastip';
+
+  const driverCapacity =
+    vehicle.jenis_kendaraan === 'mobil'
+      ? Number(vehicle.kapasitas_penumpang) || 4
+      : 1;
+  const requestedPassengers = Number(order?.jumlah_penumpang) || 1;
+  const isOverCapacity = !isJastip && requestedPassengers > driverCapacity;
+  const excessPassengers = Math.max(0, requestedPassengers - driverCapacity);
+
+  const hargaBarang = Number(order?.perkiraan_harga_barang) || 0;
+  const ongkir = Number(order?.ongkir) || 0;
+  const perkiraanTotalJastip = hargaBarang + ongkir;
+
+  const customerName = order?.customer?.nama || 'Mahasiswa';
+  const customerInitial = (customerName.trim()[0] || 'M').toUpperCase();
+
+  const handleAcceptOrder = async () => {
+    if (!order?.id) return;
+    setError('');
+    setAccepting(true);
+    try {
+      const res = await api.patch(`/orders/${order.id}/accept`);
+      navigate('/driver/pesanan', {
+        state: { order: res.data?.data || order },
+      });
+    } catch (err) {
+      setError(
+        err.response?.data?.message ||
+          'Pesanan ini sudah diambil driver lain atau tidak tersedia.'
+      );
+    } finally {
+      setAccepting(false);
+    }
+  };
+
+  const handleAcceptCustomerOffer = async () => {
+    if (!order?.id || !customerOffer) return;
+    setError('');
+    setAcceptingOffer(true);
+    try {
+      const res = await api.patch(
+        `/orders/${order.id}/offers/${customerOffer.id}/accept`
+      );
+      navigate('/driver/pesanan', {
+        state: { order: res.data?.data || order },
+      });
+    } catch (err) {
+      setError(
+        err.response?.data?.message || 'Gagal menyetujui tawaran pemesan.'
+      );
+    } finally {
+      setAcceptingOffer(false);
+    }
+  };
+
+  return (
+    <div
+      className="pwa-shell"
+      style={{
+        minHeight: '844px',
+        boxSizing: 'border-box',
+        background: '#F5F6F8',
+        position: 'relative',
+        overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+        fontSize: '13px',
+        lineHeight: 1.4,
+        color: '#0F172A',
+      }}
+    >
+      {/* Header */}
+      <div
+        style={{
+          padding: '14px 20px 0',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          height: '52px',
+          flex: 'none',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <Link
+            to="/driver"
+            aria-label="Kembali"
+            style={{
+              width: '44px',
+              height: '44px',
+              marginLeft: '-12px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#0F172A',
+            }}
+          >
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M15 5l-7 7 7 7" />
+            </svg>
+          </Link>
+          <div
+            style={{
+              fontWeight: 800,
+              fontSize: '17px',
+              letterSpacing: '-.01em',
+            }}
+          >
+            Detail request
+          </div>
+        </div>
+
+        {order && (
+          <Chip variant={isJastip ? 'warning' : 'teal'}>
+            {isJastip
+              ? 'JasTip'
+              : `AnJem Â· ${order.jenis_kendaraan === 'mobil' ? 'Mobil' : 'Motor'}`}
+          </Chip>
+        )}
+      </div>
+
+      {/* Konten Utama */}
+      <div
+        style={{
+          flex: 1,
+          padding: '8px 20px 0',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '12px',
+        }}
+      >
+        {loading && !order ? (
+          <Card style={{ textAlign: 'center', color: '#5B6678' }}>
+            Memuat detail request...
+          </Card>
+        ) : !order ? (
+          <Card style={{ textAlign: 'center', color: '#5B6678' }}>
+            Request tidak ditemukan atau sudah diambil.
+          </Card>
+        ) : (
+          <>
+            {/* Kartu Profil Pemesan */}
+            <Card style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+              <div
+                style={{
+                  width: '46px',
+                  height: '46px',
+                  borderRadius: '99px',
+                  background: '#0F766E',
+                  color: '#fff',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontWeight: 800,
+                  fontSize: '16px',
+                  flex: 'none',
+                }}
+              >
+                {customerInitial}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 800, fontSize: '15px' }}>
+                  {customerName}
+                </div>
+                <div style={{ color: '#5B6678', fontSize: '12px' }}>
+                  {order.customer?.nim
+                    ? `NIM ${order.customer.nim}`
+                    : 'Pemesan kampus'}
+                </div>
+              </div>
+              <Chip variant="neutral">
+                {order.waktu_berangkat === 'jadwal' ? 'Jadwal' : 'Sekarang'}
+              </Chip>
+            </Card>
+
+            {/* Kartu Rute */}
+            <Card
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '10px',
+              }}
+            >
+              <div style={{ fontWeight: 800 }}>Rute pengantaran</div>
+
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                <span
+                  style={{
+                    width: '10px',
+                    height: '10px',
+                    borderRadius: '99px',
+                    background: '#0F766E',
+                    flex: 'none',
+                  }}
+                />
+                <div>
+                  <div style={{ fontSize: '11px', color: '#5B6678' }}>
+                    {isJastip ? 'Beli / ambil di' : 'Titik jemput'}
+                  </div>
+                  <div style={{ fontWeight: 700 }}>{order.titik_jemput}</div>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                <span
+                  style={{
+                    width: '10px',
+                    height: '10px',
+                    borderRadius: '3px',
+                    background: '#F59E0B',
+                    flex: 'none',
+                  }}
+                />
+                <div>
+                  <div style={{ fontSize: '11px', color: '#5B6678' }}>
+                    {isJastip ? 'Antar ke' : 'Tujuan'}
+                  </div>
+                  <div style={{ fontWeight: 700 }}>{order.titik_antar}</div>
+                </div>
+              </div>
+
+              {order.catatan && (
+                <>
+                  <div style={{ height: '1px', background: '#EEF0F3' }} />
+                  <div style={{ fontSize: '12px', color: '#475569' }}>
+                    <strong>Catatan:</strong> {order.catatan}
+                  </div>
+                </>
+              )}
+            </Card>
+
+            {/* Kartu Detail Khusus AnJem (Kapasitas) vs JasTip (Barang) */}
+            {isJastip ? (
+              <Card
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px',
+                }}
+              >
+                <div style={{ fontWeight: 800 }}>Detail titipan barang</div>
+                <div
+                  style={{
+                    background: '#F5F6F8',
+                    borderRadius: '12px',
+                    padding: '10px 12px',
+                    fontWeight: 700,
+                  }}
+                >
+                  {order.nama_barang || 'Titipan barang mahasiswa'}
+                </div>
+
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}
+                >
+                  <span style={{ color: '#5B6678' }}>
+                    Perkiraan harga barang
+                  </span>
+                  <span style={{ fontWeight: 700 }}>
+                    Rp {formatRibuan(hargaBarang)}
+                  </span>
+                </div>
+
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    background: '#FEF6E7',
+                    borderRadius: '12px',
+                    padding: '10px 12px',
+                  }}
+                >
+                  <span style={{ color: '#6B4308', fontWeight: 600 }}>
+                    Perkiraan total (barang + upah)
+                  </span>
+                  <span style={{ fontWeight: 800, color: '#4A2C03' }}>
+                    Rp {formatRibuan(perkiraanTotalJastip)}
+                  </span>
+                </div>
+              </Card>
+            ) : (
+              <Card
+                variant={isOverCapacity ? 'danger' : 'default'}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}
+                >
+                  <div
+                    style={{
+                      fontWeight: 800,
+                      color: isOverCapacity ? '#7F1D1D' : '#0F172A',
+                    }}
+                  >
+                    Cek kapasitas kendaraan
+                  </div>
+                  <Chip variant={isOverCapacity ? 'danger' : 'success'}>
+                    {isOverCapacity
+                      ? `Kelebihan ${excessPassengers} orang`
+                      : 'Muat'}
+                  </Chip>
+                </div>
+
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <div
+                    style={{
+                      flex: 1,
+                      background: isOverCapacity ? '#fff' : '#F5F6F8',
+                      borderRadius: '12px',
+                      padding: '10px 12px',
+                    }}
+                  >
+                    <div style={{ fontSize: '11px', color: '#5B6678' }}>
+                      Kapasitasmu
+                    </div>
+                    <div style={{ fontWeight: 800, fontSize: '18px' }}>
+                      {driverCapacity} org
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      flex: 1,
+                      background: isOverCapacity ? '#FDECEC' : '#DDF3E4',
+                      borderRadius: '12px',
+                      padding: '10px 12px',
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: '11px',
+                        color: isOverCapacity ? '#991B1B' : '#14532D',
+                      }}
+                    >
+                      Permintaan
+                    </div>
+                    <div
+                      style={{
+                        fontWeight: 800,
+                        fontSize: '18px',
+                        color: isOverCapacity ? '#991B1B' : '#14532D',
+                      }}
+                    >
+                      {requestedPassengers} org
+                    </div>
+                  </div>
+                </div>
+
+                {isOverCapacity && (
+                  <div style={{ fontSize: '12px', color: '#7F1D1D' }}>
+                    Jumlah penumpang melebihi kapasitas kendaraanmu. Kamu bisa
+                    menawar harga ekstra lewat tombol â€œTawar hargaâ€.
+                  </div>
+                )}
+              </Card>
+            )}
+
+            {/* Kartu Tawaran Harga Pemesan */}
+            <Card
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+              }}
+            >
+              <div>
+                <div style={{ color: '#5B6678', fontSize: '11.5px' }}>
+                  {isJastip
+                    ? 'Upah driver ditawarkan'
+                    : 'Tarif yang ditawarkan pemesan'}
+                </div>
+                <div style={{ fontSize: '11.5px', color: '#5B6678' }}>
+                  Setujui langsung atau ajukan harga baru
+                </div>
+              </div>
+              <div
+                style={{
+                  fontWeight: 800,
+                  fontSize: '20px',
+                  color: '#0F766E',
+                  letterSpacing: '-.02em',
+                }}
+              >
+                Rp {formatRibuan(ongkir)}
+              </div>
+            </Card>
+          </>
+        )}
+
+        {error && (
+          <div
+            role="alert"
+            style={{
+              borderRadius: '12px',
+              background: '#FEF2F2',
+              padding: '8px 12px',
+              fontSize: '12px',
+              fontWeight: 600,
+              color: '#B91C1C',
+            }}
+          >
+            {error}
+          </div>
+        )}
+      </div>
+
+      {/* Tombol Aksi Bawah */}
+      {order && (
+        <div
+          style={{
+            padding: '12px 20px 20px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '10px',
+            flex: 'none',
+          }}
+        >
+          {order.status !== 'pending' || order.driver_id ? (
+            <Card variant="soft">
+              <div style={{ fontWeight: 800, color: '#0B4F4A' }}>
+                {order.driver_id === user?.id
+                  ? 'Harga sudah disepakati'
+                  : 'Pesanan ini sudah tidak tersedia'}
+              </div>
+              {order.driver_id === user?.id ? (
+                <>
+                  <div style={{ fontSize: '12px', color: '#0B5F59', marginTop: '4px' }}>
+                    Harga final: Rp {formatRibuan(order.ongkir)}
+                  </div>
+                  <Button
+                    type="button"
+                    variant="primary"
+                    height={44}
+                    onClick={() => navigate('/driver/pesanan', { state: { order } })}
+                  >
+                    Lihat pesanan aktif
+                  </Button>
+                </>
+              ) : (
+                <div style={{ fontSize: '12px', color: '#5B6678', marginTop: '4px' }}>
+                  Muat ulang daftar request untuk melihat pesanan lain.
+                </div>
+              )}
+            </Card>
+          ) : (
+            <>
+          {customerOffer && (
+            <Card
+              variant="soft"
+              style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}
+            >
+              <div style={{ fontWeight: 800, color: '#0B4F4A' }}>
+                Pemesan menawar balik Rp{' '}
+                {formatRibuan(customerOffer.offered_price)}
+              </div>
+              {customerOffer.adjusted_passengers ? (
+                <div style={{ fontSize: '12px', color: '#0B5F59' }}>
+                  Penumpang disesuaikan menjadi{' '}
+                  {customerOffer.adjusted_passengers} orang.
+                </div>
+              ) : null}
+              <Button
+                type="button"
+                variant="primary"
+                height={44}
+                disabled={acceptingOffer}
+                onClick={handleAcceptCustomerOffer}
+              >
+                {acceptingOffer
+                  ? 'Menyetujui...'
+                  : `Setuju Rp ${formatRibuan(customerOffer.offered_price)}`}
+              </Button>
+            </Card>
+          )}
+
+          <Button
+            type="button"
+            variant="primary"
+            disabled={accepting || isOverCapacity || !user?.is_online}
+            onClick={handleAcceptOrder}
+          >
+            {accepting
+              ? 'Menerima pesanan...'
+              : isOverCapacity
+              ? 'Melebihi kapasitas, silakan tawar'
+              : !user?.is_online
+              ? 'Aktifkan status ON dulu'
+              : `Terima Rp ${formatRibuan(ongkir)}`}
+          </Button>
+
+          <Button
+            to={`/driver/nego/${order.id}`}
+            state={{ order }}
+            variant="outline"
+          >
+            Tawar harga
+          </Button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+========================================
+FILE: frontend\src\pages\driver\DriverNavigasi.jsx
+========================================
+
+import { useEffect, useState } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { useAuth } from '../../context/AuthContext';
+import api from '../../api/axios';
+
+const DRIVER_ACTIVE_STATUSES = [
+  'accepted',
+  'on_progress',
+  'on_the_way',
+  'in_progress',
+];
+
+function formatRibuan(value) {
+  const num = Number(value) || 0;
+  return num.toLocaleString('id-ID');
+}
+
+function formatWaUrl(phone, text) {
+  if (!phone) return null;
+  let cleaned = String(phone).replace(/\D/g, '');
+  if (cleaned.startsWith('0')) {
+    cleaned = `62${cleaned.slice(1)}`;
+  }
+  return `https://wa.me/${cleaned}?text=${encodeURIComponent(text)}`;
+}
+
+export default function DriverNavigasi() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { user } = useAuth();
+
+  const [order, setOrder] = useState(() => location.state?.order || null);
+  const [updating, setUpdating] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const syncOrder = async () => {
+      try {
+        const res = await api.get('/orders');
+        const list = Array.isArray(res.data?.data) ? res.data.data : [];
+        const target = order?.id
+          ? list.find((item) => item.id === order.id)
+          : list.find(
+              (item) =>
+                item.driver_id === user?.id &&
+                DRIVER_ACTIVE_STATUSES.includes(item.status)
+            );
+
+        if (isMounted && target) {
+          setOrder(target);
+        }
+      } catch {
+        // Pertahankan state terakhir
+      }
+    };
+
+    syncOrder();
+    return () => {
+      isMounted = false;
+    };
+  }, [order?.id, user?.id]);
+
+  const isOnWay = ['on_progress', 'on_the_way', 'in_progress'].includes(
+    order?.status
+  );
+  const isCompleted = order?.status === 'completed';
+  const isJastip = order?.jenis_layanan === 'jastip';
+
+  const stageTitle = isCompleted
+    ? 'Perjalanan selesai'
+    : isOnWay
+    ? 'Menuju lokasi antar'
+    : isJastip
+    ? 'Menuju lokasi pembelian'
+    : 'Menuju titik jemput';
+
+  const targetAddress = isOnWay
+    ? order?.titik_antar || 'Titik tujuan'
+    : order?.titik_jemput || 'Titik jemput';
+
+  const activeSteps = isCompleted ? 4 : isOnWay ? 3 : 2;
+  const customerName = order?.customer?.nama || 'Mahasiswa';
+  const customerInitial = (customerName.trim()[0] || 'M').toUpperCase();
+  const customerWa = formatWaUrl(
+    order?.customer?.no_wa,
+    `Halo kak ${customerName}, saya sudah di perjalanan.`
+  );
+
+  const hargaBarang = Number(order?.perkiraan_harga_barang) || 0;
+  const ongkir = Number(order?.ongkir) || 0;
+  const totalAmount = isJastip ? hargaBarang + ongkir : ongkir;
+
+  const handleAdvanceStage = async () => {
+    if (!order?.id) return;
+    setError('');
+    setUpdating(true);
+    try {
+      const nextStatus = isOnWay ? 'completed' : 'on_progress';
+      const res = await api.patch(`/orders/${order.id}/status`, {
+        status: nextStatus,
+      });
+      if (nextStatus === 'completed') {
+        navigate('/driver/history');
+      } else {
+        setOrder(res.data?.data || { ...order, status: 'on_progress' });
+      }
+    } catch (err) {
+      setError(
+        err.response?.data?.message || 'Gagal memperbarui status perjalanan.'
+      );
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  return (
+    <div
+      className="pwa-shell"
+      style={{
+        height: '844px',
+        minHeight: '844px',
+        boxSizing: 'border-box',
+        background: '#E9EEF0',
+        position: 'relative',
+        overflow: 'hidden',
+        fontSize: '13px',
+        lineHeight: 1.4,
+        color: '#0F172A',
+      }}
+    >
+      {/* Peta Rute */}
+      <svg
+        width="390"
+        height="600"
+        viewBox="0 0 390 600"
+        fill="none"
+        aria-hidden="true"
+        style={{ position: 'absolute', left: 0, top: 0 }}
+      >
+        <path
+          d="M-10 460 C90 420 150 330 230 350 S350 410 400 290"
+          stroke="#fff"
+          strokeWidth="16"
+          strokeLinecap="round"
+        />
+        <path
+          d="M130 -10 C160 110 110 220 170 350 S230 520 210 610"
+          stroke="#fff"
+          strokeWidth="10"
+          strokeLinecap="round"
+        />
+        <path d="M-10 170 L400 130" stroke="#fff" strokeWidth="9" />
+        <rect x="310" y="370" width="70" height="70" rx="10" fill="#DDE7E4" />
+        <rect x="18" y="220" width="80" height="90" rx="10" fill="#DDE7E4" />
+        <path
+          d="M120 120 C130 200 160 280 190 345"
+          stroke="#0F766E"
+          strokeWidth="6"
+          strokeLinecap="round"
+        />
+        <circle
+          cx="190"
+          cy="345"
+          r="9"
+          fill="#fff"
+          stroke="#F59E0B"
+          strokeWidth="3"
+        />
+        <circle cx="190" cy="345" r="3.5" fill="#F59E0B" />
+        <g transform="translate(120 120)">
+          <circle r="20" fill="#0F766E" fillOpacity=".18" />
+          <circle r="14" fill="#0F766E" stroke="#fff" strokeWidth="3" />
+          <circle r="4" fill="#fff" />
+        </g>
+      </svg>
+
+      {/* Tombol Kembali */}
+      <Link
+        to="/driver/pesanan"
+        aria-label="Kembali"
+        style={{
+          position: 'absolute',
+          left: '16px',
+          top: '16px',
+          width: '44px',
+          height: '44px',
+          borderRadius: '14px',
+          background: '#fff',
+          boxShadow: '0 2px 8px rgba(15,23,42,.12)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: '#0F172A',
+        }}
+      >
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M15 5l-7 7 7 7" />
+        </svg>
+      </Link>
+
+      {/* Pil GPS */}
+      <div
+        style={{
+          position: 'absolute',
+          right: '16px',
+          top: '20px',
+          background: '#fff',
+          borderRadius: '99px',
+          padding: '7px 12px',
+          boxShadow: '0 2px 8px rgba(15,23,42,.12)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          fontWeight: 700,
+          fontSize: '12px',
+        }}
+      >
+        <span
+          style={{
+            width: '8px',
+            height: '8px',
+            borderRadius: '99px',
+            background: '#16A34A',
+          }}
+        />
+        Navigasi aktif
+      </div>
+
+      {/* Bottom Sheet */}
+      <div
+        style={{
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: '#fff',
+          borderRadius: '28px 28px 0 0',
+          padding: '12px 20px 22px',
+          boxShadow: '0 -8px 30px rgba(15,23,42,.1)',
+        }}
+      >
+        <div
+          style={{
+            width: '40px',
+            height: '4px',
+            borderRadius: '4px',
+            background: '#D5DAE1',
+            margin: '0 auto 14px',
+          }}
+        />
+
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'flex-end',
+          }}
+        >
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ color: '#5B6678', fontSize: '12px' }}>
+              {stageTitle}
+            </div>
+            <div
+              style={{
+                fontWeight: 800,
+                fontSize: '18px',
+                letterSpacing: '-.02em',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              {targetAddress}
+            </div>
+          </div>
+          <div style={{ textAlign: 'right', flex: 'none', marginLeft: '10px' }}>
+            <div style={{ color: '#5B6678', fontSize: '12px' }}>Estimasi</div>
+            <div style={{ fontWeight: 800, fontSize: '15px' }}>
+              {isOnWay ? 'Â± 6 mnt' : 'Â± 4 mnt'}
+            </div>
+          </div>
+        </div>
+
+        {/* Progress Bar 4 Tahap */}
+        <div style={{ display: 'flex', gap: '6px', marginTop: '14px' }}>
+          {[1, 2, 3, 4].map((step) => (
+            <div
+              key={step}
+              style={{
+                flex: 1,
+                height: '4px',
+                borderRadius: '4px',
+                background: step <= activeSteps ? '#0F766E' : '#E2E6EB',
+              }}
+            />
+          ))}
+        </div>
+
+        {/* Kartu Pemesan */}
+        <div
+          style={{
+            marginTop: '16px',
+            display: 'flex',
+            gap: '12px',
+            alignItems: 'center',
+            background: '#F5F6F8',
+            borderRadius: '16px',
+            padding: '12px',
+          }}
+        >
+          <div
+            style={{
+              width: '46px',
+              height: '46px',
+              borderRadius: '99px',
+              background: '#0F766E',
+              color: '#fff',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontWeight: 800,
+              fontSize: '16px',
+              flex: 'none',
+            }}
+          >
+            {customerInitial}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 800, fontSize: '15px' }}>
+              {customerName}
+            </div>
+            <div style={{ color: '#5B6678', fontSize: '12px' }}>
+              {isJastip
+                ? order?.nama_barang || 'JasTip'
+                : `AnJem Â· ${order?.jumlah_penumpang || 1} penumpang`}
+            </div>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ color: '#5B6678', fontSize: '11px' }}>
+              Total tagihan
+            </div>
+            <div style={{ fontWeight: 800 }}>
+              Rp {formatRibuan(totalAmount)}
+            </div>
+          </div>
+        </div>
+
+        {error && (
+          <div
+            role="alert"
+            style={{
+              marginTop: '10px',
+              borderRadius: '12px',
+              background: '#FEF2F2',
+              padding: '8px 12px',
+              fontSize: '12px',
+              fontWeight: 600,
+              color: '#B91C1C',
+              textAlign: 'center',
+            }}
+          >
+            {error}
+          </div>
+        )}
+
+        {/* Tombol Aksi */}
+        <div style={{ display: 'flex', gap: '10px', marginTop: '14px' }}>
+          {customerWa && (
+            <a
+              href={customerWa}
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                height: '46px',
+                borderRadius: '14px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                fontWeight: 700,
+                fontSize: '13px',
+                textDecoration: 'none',
+                boxSizing: 'border-box',
+                padding: '0 16px',
+                background: '#fff',
+                color: '#0F172A',
+                boxShadow: 'inset 0 0 0 1.5px #D5DAE1',
+              }}
+            >
+              WhatsApp
+            </a>
+          )}
+
+          {order && !isCompleted && (
+            <button
+              type="button"
+              disabled={updating}
+              onClick={handleAdvanceStage}
+              style={{
+                height: '46px',
+                borderRadius: '14px',
+                border: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                font: "700 13px 'Plus Jakarta Sans',system-ui,sans-serif",
+                flex: 1,
+                background: isOnWay ? '#16A34A' : '#0F766E',
+                color: '#fff',
+                cursor: updating ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {updating
+                ? 'Memproses...'
+                : isOnWay
+                ? 'Selesaikan pesanan'
+                : 'Mulai antar'}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+
+========================================
+FILE: frontend\src\pages\driver\DriverPesanan.jsx
+========================================
+
+import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { useAuth } from '../../context/AuthContext';
+import api from '../../api/axios';
+import Card from '../../components/Card';
+import Chip from '../../components/Chip';
+import BottomNav from '../../components/BottomNav';
+import { waktuLabel } from '../../utils/format';
+
+const DRIVER_ACTIVE_STATUSES = [
+  'accepted',
+  'on_progress',
+  'on_the_way',
+  'in_progress',
+];
+
+function formatRibuan(value) {
+  const num = Number(value) || 0;
+  return num.toLocaleString('id-ID');
+}
+
+function formatWaUrl(phone, text) {
+  if (!phone) return null;
+  let cleaned = String(phone).replace(/\D/g, '');
+  if (cleaned.startsWith('0')) {
+    cleaned = `62${cleaned.slice(1)}`;
+  }
+  return `https://wa.me/${cleaned}?text=${encodeURIComponent(text)}`;
+}
+
+export default function DriverPesanan() {
+  const { user } = useAuth();
+
+  const [orders, setOrders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [updatingId, setUpdatingId] = useState(null);
+  const [error, setError] = useState('');
+
+  const fetchDriverOrders = useCallback(async () => {
+    try {
+      const res = await api.get('/orders');
+      const list = Array.isArray(res.data?.data) ? res.data.data : [];
+      const activeList = list.filter(
+        (item) =>
+          item.driver_id === user?.id &&
+          DRIVER_ACTIVE_STATUSES.includes(item.status)
+      );
+      setOrders(activeList);
+      setError('');
+    } catch {
+      setError('Koneksi terputus. Menampilkan data pesanan terakhir yang berhasil dimuat.');
+    } finally {
+      setLoading(false);
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    fetchDriverOrders();
+    const interval = setInterval(fetchDriverOrders, 5000);
+    return () => clearInterval(interval);
+  }, [fetchDriverOrders]);
+
+  const handleUpdateStatus = async (orderId, nextStatus) => {
+    setError('');
+    setUpdatingId(orderId);
+    try {
+      await api.patch(`/orders/${orderId}/status`, {
+        status: nextStatus,
+      });
+      await fetchDriverOrders();
+    } catch (err) {
+      setError(
+        err.response?.data?.message || 'Gagal memperbarui status pesanan.'
+      );
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  return (
+    <div
+      className="pwa-shell"
+      style={{
+        height: '844px',
+        minHeight: '844px',
+        boxSizing: 'border-box',
+        background: '#F5F6F8',
+        position: 'relative',
+        overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+        fontSize: '13px',
+        lineHeight: 1.4,
+        color: '#0F172A',
+      }}
+    >
+      {/* Header */}
+      <div style={{ padding: '20px 20px 0', flex: 'none' }}>
+        <h1
+          style={{
+            fontSize: '20px',
+            fontWeight: 800,
+            letterSpacing: '-.02em',
+            margin: 0,
+          }}
+        >
+          Pesanan
+        </h1>
+        <div style={{ color: '#5B6678', marginTop: '2px' }}>
+          Pesanan aktif yang sedang kamu tangani.
+        </div>
+      </div>
+
+      {/* Konten Utama */}
+      <div
+        style={{
+          flex: 1,
+          padding: '16px 20px 84px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '12px',
+          overflowY: 'auto',
+        }}
+      >
+        {error && (
+          <div
+            role="alert"
+            style={{
+              borderRadius: '12px',
+              background: '#FEF2F2',
+              padding: '8px 12px',
+              fontSize: '12px',
+              fontWeight: 600,
+              color: '#B91C1C',
+            }}
+          >
+            {error}
+          </div>
+        )}
+
+        {loading ? (
+          <Card style={{ textAlign: 'center', color: '#5B6678' }}>
+            Memuat pesanan aktif...
+          </Card>
+        ) : orders.length === 0 ? (
+          <Card
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              textAlign: 'center',
+              gap: '8px',
+              padding: '24px 16px',
+            }}
+          >
+            <div style={{ fontWeight: 800, fontSize: '15px' }}>
+              Belum ada pesanan aktif
+            </div>
+            <div style={{ color: '#5B6678', fontSize: '12px' }}>
+              Ambil request masuk dari Beranda Driver untuk mulai mengantar.
+            </div>
+            <Link
+              to="/driver"
+              style={{
+                marginTop: '6px',
+                height: '40px',
+                padding: '0 18px',
+                borderRadius: '12px',
+                background: '#0F766E',
+                color: '#fff',
+                fontWeight: 700,
+                fontSize: '13px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                textDecoration: 'none',
+              }}
+            >
+              Lihat request masuk
+            </Link>
+          </Card>
+        ) : (
+          orders.map((order) => {
+            const isJastip = order.jenis_layanan === 'jastip';
+            const isMotor = order.jenis_kendaraan === 'motor';
+            const isOnWay = ['on_progress', 'on_the_way', 'in_progress'].includes(
+              order.status
+            );
+
+            const customerName = order.customer?.nama || 'Mahasiswa';
+            const customerWa = formatWaUrl(
+              order.customer?.no_wa,
+              `Halo kak ${customerName}, saya driver AnjemDips yang mengambil pesananmu.`
+            );
+
+            const hargaBarang = Number(order.perkiraan_harga_barang) || 0;
+            const ongkir = Number(order.ongkir) || 0;
+            const totalTagihan = isJastip ? hargaBarang + ongkir : ongkir;
+
+            return (
+              <Card
+                key={order.id}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '12px',
+                }}
+              >
+                {/* Header Kartu */}
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                  }}
+                >
+                  <div
+                    style={{
+                      width: '38px',
+                      height: '38px',
+                      borderRadius: '12px',
+                      background: isJastip ? '#FDE9B8' : '#E6F4F2',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: isJastip ? '#6B4308' : '#0F766E',
+                      flex: 'none',
+                    }}
+                  >
+                    {isJastip ? (
+                      <svg
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M5 8h14l-1 12H6z" />
+                        <path d="M9 8a3 3 0 0 1 6 0" />
+                      </svg>
+                    ) : isMotor ? (
+                      <svg
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <circle cx="6" cy="16" r="3" />
+                        <circle cx="18" cy="16" r="3" />
+                        <path d="M6 16l4-7h5l3 7M9 9H7" />
+                      </svg>
+                    ) : (
+                      <svg
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M4 16v-4l2-5h12l2 5v4zM4 16v3M20 16v3" />
+                      </svg>
+                    )}
+                  </div>
+
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 800 }}>{customerName}</div>
+                    <div style={{ color: '#5B6678', fontSize: '12px' }}>
+                      {isJastip
+                        ? `JasTip Â· ${order.nama_barang || 'Titip barang'}${
+                            order.waktu_berangkat === 'jadwal'
+                              ? ` Â· ${waktuLabel(order)}`
+                              : ''
+                          }`
+                        : `AnJem Â· ${order.jumlah_penumpang || 1} penumpang${
+                            order.waktu_berangkat === 'jadwal'
+                              ? ` Â· ${waktuLabel(order)}`
+                              : ''
+                          }`}
+                    </div>
+                  </div>
+
+                  <Chip variant="teal">
+                    {isOnWay ? 'Di jalan' : 'Menjemput'}
+                  </Chip>
+                </div>
+
+                {/* Rute */}
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '8px',
+                    paddingLeft: '2px',
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      gap: '10px',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: '10px',
+                        height: '10px',
+                        borderRadius: '99px',
+                        background: '#0F766E',
+                        flex: 'none',
+                      }}
+                    />
+                    <span style={{ fontWeight: 600 }}>{order.titik_jemput}</span>
+                  </div>
+                  <div
+                    style={{
+                      display: 'flex',
+                      gap: '10px',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: '10px',
+                        height: '10px',
+                        borderRadius: '3px',
+                        background: '#F59E0B',
+                        flex: 'none',
+                      }}
+                    />
+                    <span style={{ fontWeight: 600 }}>{order.titik_antar}</span>
+                  </div>
+                </div>
+
+                {/* Progress Bar 4 Tahap */}
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: '6px',
+                    alignItems: 'center',
+                  }}
+                >
+                  <div
+                    style={{
+                      flex: 1,
+                      height: '4px',
+                      borderRadius: '4px',
+                      background: '#0F766E',
+                    }}
+                  />
+                  <div
+                    style={{
+                      flex: 1,
+                      height: '4px',
+                      borderRadius: '4px',
+                      background: '#0F766E',
+                    }}
+                  />
+                  <div
+                    style={{
+                      flex: 1,
+                      height: '4px',
+                      borderRadius: '4px',
+                      background: isOnWay ? '#0F766E' : '#E2E6EB',
+                    }}
+                  />
+                  <div
+                    style={{
+                      flex: 1,
+                      height: '4px',
+                      borderRadius: '4px',
+                      background: '#E2E6EB',
+                    }}
+                  />
+                </div>
+
+                <div
+                  style={{
+                    color: '#5B6678',
+                    fontSize: '11.5px',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                  }}
+                >
+                  <span>Diterima</span>
+                  <span
+                    style={
+                      !isOnWay
+                        ? { color: '#0F766E', fontWeight: 700 }
+                        : undefined
+                    }
+                  >
+                    Menjemput
+                  </span>
+                  <span
+                    style={
+                      isOnWay
+                        ? { color: '#0F766E', fontWeight: 700 }
+                        : undefined
+                    }
+                  >
+                    Di jalan
+                  </span>
+                  <span>Selesai</span>
+                </div>
+
+                {/* Rincian Tarif */}
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    background: '#F5F6F8',
+                    borderRadius: '12px',
+                    padding: '10px 12px',
+                  }}
+                >
+                  <span style={{ color: '#5B6678', fontSize: '12px' }}>
+                    {isJastip
+                      ? `Upah Rp ${formatRibuan(ongkir)} + barang Rp ${formatRibuan(hargaBarang)}`
+                      : 'Upah perjalanan'}
+                  </span>
+                  <span style={{ fontWeight: 800, color: '#0F766E' }}>
+                    Rp {formatRibuan(totalTagihan)}
+                  </span>
+                </div>
+
+                {/* Tombol Tahap Perjalanan Utama */}
+                {!isOnWay ? (
+                  <button
+                    type="button"
+                    disabled={updatingId === order.id}
+                    onClick={() => handleUpdateStatus(order.id, 'on_progress')}
+                    style={{
+                      height: '46px',
+                      borderRadius: '14px',
+                      border: 0,
+                      background: '#0F766E',
+                      color: '#fff',
+                      font: "700 13.5px 'Plus Jakarta Sans',system-ui,sans-serif",
+                      cursor:
+                        updatingId === order.id ? 'not-allowed' : 'pointer',
+                      width: '100%',
+                    }}
+                  >
+                    {updatingId === order.id
+                      ? 'Memperbarui...'
+                      : isJastip
+                      ? 'Barang dibeli Â· Mulai antar'
+                      : 'Sudah jemput Â· Mulai antar'}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={updatingId === order.id}
+                    onClick={() => handleUpdateStatus(order.id, 'completed')}
+                    style={{
+                      height: '46px',
+                      borderRadius: '14px',
+                      border: 0,
+                      background: '#16A34A',
+                      color: '#fff',
+                      font: "700 13.5px 'Plus Jakarta Sans',system-ui,sans-serif",
+                      cursor:
+                        updatingId === order.id ? 'not-allowed' : 'pointer',
+                      width: '100%',
+                    }}
+                  >
+                    {updatingId === order.id
+                      ? 'Menyelesaikan...'
+                      : 'Selesaikan pesanan'}
+                  </button>
+                )}
+
+                {/* Tombol Peta, WhatsApp & Batalkan */}
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <Link
+                    to="/driver/navigasi"
+                    state={{ order }}
+                    style={{
+                      flex: 1,
+                      height: '40px',
+                      borderRadius: '12px',
+                      background: '#fff',
+                      boxShadow: 'inset 0 0 0 1.5px #D5DAE1',
+                      color: '#0F172A',
+                      fontWeight: 700,
+                      fontSize: '12.5px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      textDecoration: 'none',
+                    }}
+                  >
+                    Peta
+                  </Link>
+
+                  {customerWa && (
+                    <a
+                      href={customerWa}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{
+                        flex: 1,
+                        height: '40px',
+                        borderRadius: '12px',
+                        background: '#E6F4F2',
+                        color: '#0B5F59',
+                        fontWeight: 700,
+                        fontSize: '12.5px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        textDecoration: 'none',
+                      }}
+                    >
+                      WhatsApp
+                    </a>
+                  )}
+
+                  <button
+                    type="button"
+                    disabled={updatingId === order.id}
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          'Yakin batalkan pesanan ini? Pemesan akan diberi tahu.'
+                        )
+                      ) {
+                        handleUpdateStatus(order.id, 'cancelled');
+                      }
+                    }}
+                    style={{
+                      flex: 1,
+                      height: '40px',
+                      borderRadius: '12px',
+                      border: 0,
+                      background: '#fff',
+                      boxShadow: 'inset 0 0 0 1.5px #F3C4C4',
+                      color: '#B91C1C',
+                      font: "700 12.5px 'Plus Jakarta Sans',system-ui,sans-serif",
+                      cursor:
+                        updatingId === order.id ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    Batalkan
+                  </button>
+                </div>
+              </Card>
+            );
+          })
+        )}
+      </div>
+
+      {/* Bottom Navigation */}
+      <BottomNav role="driver" />
+    </div>
+  );
+}
+
+
+========================================
+FILE: frontend\src\pages\customer\CustomerAnjem.jsx
+========================================
+
+import { useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import api from '../../api/axios';
+import Card from '../../components/Card';
+import Button from '../../components/Button';
+import Input from '../../components/Input';
+
+function formatRibuan(digits) {
+  if (!digits) return '';
+  return Number(digits).toLocaleString('id-ID');
+}
+
+const MAX_PENUMPANG = { motor: 1, mobil: 8 };
+
+export default function CustomerAnjem() {
+  const navigate = useNavigate();
+
+  const [titikJemput, setTitikJemput] = useState('');
+  const [titikAntar, setTitikAntar] = useState('');
+  const [jenisKendaraan, setJenisKendaraan] = useState('mobil'); // 'motor' | 'mobil'
+  const [waktuBerangkat, setWaktuBerangkat] = useState('sekarang'); // 'sekarang' | 'jadwal'
+  const [jadwalAt, setJadwalAt] = useState('');
+  const [jumlahPenumpang, setJumlahPenumpang] = useState(3);
+  const [ongkirDigits, setOngkirDigits] = useState('15000');
+
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const maxPenumpang = MAX_PENUMPANG[jenisKendaraan];
+
+  const handleSelectKendaraan = (vehicle) => {
+    setJenisKendaraan(vehicle);
+    if (vehicle === 'motor' && jumlahPenumpang > 1) {
+      setJumlahPenumpang(1);
+    } else if (vehicle === 'mobil' && jumlahPenumpang === 1) {
+      setJumlahPenumpang(3);
+    }
+  };
+
+  const handleOngkirChange = (e) => {
+    const raw = e.target.value.replace(/\D/g, '');
+    setOngkirDigits(raw);
+    if (error) setError('');
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+
+    const cleanJemput = titikJemput.trim();
+    const cleanAntar = titikAntar.trim();
+    const numericOngkir = Number(ongkirDigits);
+
+    if (!cleanJemput || !cleanAntar) {
+      setError('Titik jemput dan tujuan wajib diisi.');
+      return;
+    }
+
+    if (!numericOngkir || numericOngkir < 2000) {
+      setError('Minimal tawaran harga adalah Rp 2.000.');
+      return;
+    }
+
+    let jadwalIso = null;
+    if (waktuBerangkat === 'jadwal') {
+      const picked = new Date(jadwalAt);
+      if (
+        !jadwalAt ||
+        Number.isNaN(picked.getTime()) ||
+        picked.getTime() < Date.now()
+      ) {
+        setError(
+          'Pilih tanggal dan jam berangkat yang valid (tidak di masa lalu).'
+        );
+        return;
+      }
+      jadwalIso = picked.toISOString();
+    }
+
+    setSubmitting(true);
+    try {
+      const payload = {
+        jenis_layanan: 'anjem',
+        titik_jemput: cleanJemput,
+        titik_antar: cleanAntar,
+        ongkir: numericOngkir,
+        jenis_kendaraan: jenisKendaraan,
+        jumlah_penumpang: jumlahPenumpang,
+        waktu_berangkat: waktuBerangkat,
+        jadwal_at: jadwalIso,
+      };
+
+      const res = await api.post('/orders', payload);
+      navigate('/customer/mencari', {
+        state: { order: res.data?.data },
+      });
+    } catch (err) {
+      setError(
+        err.response?.data?.message || 'Gagal membuat pesanan. Coba lagi.'
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <form
+      onSubmit={handleSubmit}
+      noValidate
+      className="pwa-shell"
+      style={{
+        minHeight: '844px',
+        boxSizing: 'border-box',
+        background: '#F5F6F8',
+        position: 'relative',
+        overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+        fontSize: '13px',
+        lineHeight: 1.4,
+        color: '#0F172A',
+      }}
+    >
+      {/* Header */}
+      <div
+        style={{
+          padding: '14px 20px 0',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          height: '52px',
+          flex: 'none',
+        }}
+      >
+        <Link
+          to="/customer"
+          aria-label="Kembali"
+          style={{
+            width: '44px',
+            height: '44px',
+            marginLeft: '-12px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: '#0F172A',
+          }}
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M15 5l-7 7 7 7" />
+          </svg>
+        </Link>
+        <div
+          style={{
+            fontWeight: 800,
+            fontSize: '17px',
+            letterSpacing: '-.01em',
+          }}
+        >
+          Pesan AnJem
+        </div>
+      </div>
+
+      {/* Konten Utama */}
+      <div
+        style={{
+          flex: 1,
+          padding: '6px 20px 0',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '12px',
+          overflow: 'hidden',
+        }}
+      >
+        {/* Kartu Titik Jemput & Tujuan + Peta */}
+        <Card
+          style={{
+            padding: '12px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px',
+          }}
+        >
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '3px',
+                flex: 'none',
+              }}
+            >
+              <span
+                style={{
+                  width: '10px',
+                  height: '10px',
+                  borderRadius: '99px',
+                  background: '#0F766E',
+                }}
+              />
+              <span
+                style={{
+                  width: '2px',
+                  height: '22px',
+                  background: '#D5DAE1',
+                }}
+              />
+              <span
+                style={{
+                  width: '10px',
+                  height: '10px',
+                  borderRadius: '3px',
+                  background: '#F59E0B',
+                }}
+              />
+            </div>
+
+            <div
+              style={{
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '8px',
+              }}
+            >
+              <Input
+                label="Titik jemput"
+                hideLabel
+                aria-label="Titik jemput"
+                placeholder="Jemput di mana? (contoh: Kos Sirojudin)"
+                value={titikJemput}
+                onChange={(e) => {
+                  setTitikJemput(e.target.value);
+                  if (error) setError('');
+                }}
+              />
+              <Input
+                label="Tujuan"
+                hideLabel
+                aria-label="Tujuan"
+                placeholder="Mau ke mana?"
+                value={titikAntar}
+                onChange={(e) => {
+                  setTitikAntar(e.target.value);
+                  if (error) setError('');
+                }}
+              />
+            </div>
+          </div>
+
+          <div
+            style={{
+              height: '92px',
+              borderRadius: '12px',
+              background: '#E9EEF0',
+              position: 'relative',
+              overflow: 'hidden',
+            }}
+          >
+            <svg
+              width="100%"
+              height="92"
+              viewBox="0 0 330 92"
+              preserveAspectRatio="none"
+              fill="none"
+              aria-hidden="true"
+            >
+              <path
+                d="M-5 70 C60 60 90 20 160 44 S280 80 340 20"
+                stroke="#fff"
+                strokeWidth="10"
+                strokeLinecap="round"
+              />
+              <path d="M110 -5 L150 100" stroke="#fff" strokeWidth="6" />
+              <path
+                d="M-5 70 C60 60 90 20 160 44 S280 80 340 20"
+                stroke="#0F766E"
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeDasharray="1 7"
+              />
+              <circle cx="52" cy="62" r="7" fill="#0F766E" />
+              <circle cx="268" cy="62" r="7" fill="#F59E0B" />
+            </svg>
+          </div>
+        </Card>
+
+        {/* Kartu Kendaraan, Berangkat & Penumpang */}
+        <Card
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '12px',
+          }}
+        >
+          <div>
+            <div
+              style={{
+                fontSize: '11px',
+                fontWeight: 600,
+                color: '#475569',
+                marginBottom: '6px',
+              }}
+            >
+              Jenis kendaraan
+            </div>
+            <div
+              style={{
+                display: 'flex',
+                background: '#F1F3F6',
+                borderRadius: '12px',
+                padding: '3px',
+                gap: '3px',
+              }}
+            >
+              <div
+                role="button"
+                tabIndex={0}
+                aria-pressed={jenisKendaraan === 'motor'}
+                onClick={() => handleSelectKendaraan('motor')}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    handleSelectKendaraan('motor');
+                  }
+                }}
+                style={{
+                  flex: 1,
+                  height: '38px',
+                  borderRadius: '9px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px',
+                  fontWeight: 700,
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                  background:
+                    jenisKendaraan === 'motor' ? '#fff' : 'transparent',
+                  color: jenisKendaraan === 'motor' ? '#0F766E' : '#5B6678',
+                  boxShadow:
+                    jenisKendaraan === 'motor'
+                      ? '0 1px 3px rgba(15,23,42,.12)'
+                      : 'none',
+                }}
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <circle cx="6" cy="16" r="3" />
+                  <circle cx="18" cy="16" r="3" />
+                  <path d="M6 16l4-7h5l3 7M9 9H7" />
+                </svg>
+                Motor
+              </div>
+
+              <div
+                role="button"
+                tabIndex={0}
+                aria-pressed={jenisKendaraan === 'mobil'}
+                onClick={() => handleSelectKendaraan('mobil')}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    handleSelectKendaraan('mobil');
+                  }
+                }}
+                style={{
+                  flex: 1,
+                  height: '38px',
+                  borderRadius: '9px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px',
+                  fontWeight: 700,
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                  background:
+                    jenisKendaraan === 'mobil' ? '#fff' : 'transparent',
+                  color: jenisKendaraan === 'mobil' ? '#0F766E' : '#5B6678',
+                  boxShadow:
+                    jenisKendaraan === 'mobil'
+                      ? '0 1px 3px rgba(15,23,42,.12)'
+                      : 'none',
+                }}
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M4 16v-4l2-5h12l2 5v4zM4 16v3M20 16v3" />
+                </svg>
+                Mobil
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: '12px' }}>
+            <div style={{ flex: 1 }}>
+              <div
+                style={{
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  color: '#475569',
+                  marginBottom: '6px',
+                }}
+              >
+                Berangkat
+              </div>
+              <div
+                style={{
+                  display: 'flex',
+                  background: '#F1F3F6',
+                  borderRadius: '12px',
+                  padding: '3px',
+                  gap: '3px',
+                }}
+              >
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-pressed={waktuBerangkat === 'sekarang'}
+                  onClick={() => setWaktuBerangkat('sekarang')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setWaktuBerangkat('sekarang');
+                    }
+                  }}
+                  style={{
+                    flex: 1,
+                    height: '38px',
+                    borderRadius: '9px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '6px',
+                    fontWeight: 700,
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                    background:
+                      waktuBerangkat === 'sekarang' ? '#fff' : 'transparent',
+                    color:
+                      waktuBerangkat === 'sekarang' ? '#0F766E' : '#5B6678',
+                    boxShadow:
+                      waktuBerangkat === 'sekarang'
+                        ? '0 1px 3px rgba(15,23,42,.12)'
+                        : 'none',
+                  }}
+                >
+                  Sekarang
+                </div>
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-pressed={waktuBerangkat === 'jadwal'}
+                  onClick={() => setWaktuBerangkat('jadwal')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setWaktuBerangkat('jadwal');
+                    }
+                  }}
+                  style={{
+                    flex: 1,
+                    height: '38px',
+                    borderRadius: '9px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '6px',
+                    fontWeight: 700,
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                    background:
+                      waktuBerangkat === 'jadwal' ? '#fff' : 'transparent',
+                    color: waktuBerangkat === 'jadwal' ? '#0F766E' : '#5B6678',
+                    boxShadow:
+                      waktuBerangkat === 'jadwal'
+                        ? '0 1px 3px rgba(15,23,42,.12)'
+                        : 'none',
+                  }}
+                >
+                  Jadwal
+                </div>
+              </div>
+            </div>
+
+            <div style={{ flex: 1 }}>
+              <div
+                style={{
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  color: '#475569',
+                  marginBottom: '6px',
+                }}
+              >
+                Jumlah penumpang
+              </div>
+              <div
+                style={{
+                  height: '44px',
+                  borderRadius: '12px',
+                  background: '#F5F6F8',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '0 5px',
+                }}
+              >
+                <button
+                  type="button"
+                  aria-label="Kurangi"
+                  disabled={jumlahPenumpang <= 1}
+                  onClick={() =>
+                    setJumlahPenumpang((prev) => Math.max(1, prev - 1))
+                  }
+                  style={{
+                    opacity: jumlahPenumpang <= 1 ? 0.4 : 1,
+                    width: '34px',
+                    height: '34px',
+                    borderRadius: '10px',
+                    border: 0,
+                    background: '#fff',
+                    fontSize: '18px',
+                    color: '#0F172A',
+                    cursor: 'pointer',
+                    boxShadow: '0 1px 2px rgba(15,23,42,.1)',
+                  }}
+                >
+                  -
+                </button>
+                <span style={{ fontWeight: 800, fontSize: '15px' }}>
+                  {jumlahPenumpang}
+                </span>
+                <button
+                  type="button"
+                  aria-label="Tambah"
+                  disabled={jumlahPenumpang >= maxPenumpang}
+                  onClick={() =>
+                    setJumlahPenumpang((prev) => Math.min(maxPenumpang, prev + 1))
+                  }
+                  style={{
+                    opacity: jumlahPenumpang >= maxPenumpang ? 0.4 : 1,
+                    width: '34px',
+                    height: '34px',
+                    borderRadius: '10px',
+                    border: 0,
+                    background: '#fff',
+                    fontSize: '18px',
+                    color: '#0F172A',
+                    cursor: jumlahPenumpang >= maxPenumpang ? 'not-allowed' : 'pointer',
+                    boxShadow: '0 1px 2px rgba(15,23,42,.1)',
+                  }}
+                >
+                  +
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {waktuBerangkat === 'jadwal' && (
+            <Input
+              label="Tanggal & jam berangkat"
+              type="datetime-local"
+              value={jadwalAt}
+              onChange={(e) => {
+                setJadwalAt(e.target.value);
+                if (error) setError('');
+              }}
+            />
+          )}
+
+          <div
+            style={{
+              color: '#5B6678',
+              fontSize: '11.5px',
+              marginTop: '-4px',
+            }}
+          >
+            Pilih â€œJadwalâ€ untuk berangkat di waktu mendatang, lalu tentukan
+            tanggal dan jamnya.
+          </div>
+        </Card>
+
+        {/* Kartu Harga Tawaran */}
+        <Card>
+          <label style={{ display: 'block' }}>
+            <div
+              style={{
+                fontSize: '11px',
+                fontWeight: 600,
+                color: '#475569',
+                marginBottom: '6px',
+              }}
+            >
+              Harga yang kamu tawarkan
+            </div>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                height: '52px',
+                borderRadius: '12px',
+                background: '#F5F6F8',
+                padding: '0 14px',
+              }}
+            >
+              <span style={{ fontWeight: 700, color: '#5B6678' }}>Rp</span>
+              <input
+                aria-label="Tawaran harga"
+                value={formatRibuan(ongkirDigits)}
+                onChange={handleOngkirChange}
+                inputMode="numeric"
+                style={{
+                  flex: 1,
+                  border: 0,
+                  outline: 0,
+                  background: 'transparent',
+                  font: "800 20px 'Plus Jakarta Sans',system-ui,sans-serif",
+                  color: '#0F172A',
+                  minWidth: 0,
+                }}
+              />
+            </div>
+          </label>
+          <div
+            style={{
+              color: '#5B6678',
+              fontSize: '11.5px',
+              marginTop: '8px',
+            }}
+          >
+            Driver bisa langsung menerima, atau menawar balik.
+          </div>
+        </Card>
+
+        {error && (
+          <div
+            role="alert"
+            style={{
+              borderRadius: '12px',
+              background: '#FEF2F2',
+              padding: '8px 12px',
+              fontSize: '12px',
+              fontWeight: 600,
+              color: '#B91C1C',
+            }}
+          >
+            {error}
+          </div>
+        )}
+      </div>
+
+      {/* Tombol Bawah */}
+      <div
+        style={{
+          padding: '12px 20px 20px',
+          flex: 'none',
+          background: '#F5F6F8',
+        }}
+      >
+        <Button type="submit" variant="primary" disabled={submitting}>
+          {submitting ? 'Mencari driver...' : 'Cari driver'}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+
+========================================
+FILE: frontend\src\pages\customer\CustomerJastip.jsx
+========================================
+
+import { useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import api from '../../api/axios';
+import Card from '../../components/Card';
+import Button from '../../components/Button';
+import Input from '../../components/Input';
+
+function formatRibuan(digits) {
+  if (!digits) return '';
+  return Number(digits).toLocaleString('id-ID');
+}
+
+export default function CustomerJastip() {
+  const navigate = useNavigate();
+
+  const [namaBarang, setNamaBarang] = useState('');
+  const [titikJemput, setTitikJemput] = useState('');
+  const [titikAntar, setTitikAntar] = useState('');
+  const [waktuBerangkat, setWaktuBerangkat] = useState('sekarang'); // 'sekarang' | 'jadwal'
+  const [jadwalAt, setJadwalAt] = useState('');
+  const [hargaBarangDigits, setHargaBarangDigits] = useState('30000');
+  const [ongkirDigits, setOngkirDigits] = useState('8000');
+  const [catatan, setCatatan] = useState('');
+
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  const numericHargaBarang = Number(hargaBarangDigits) || 0;
+  const numericOngkir = Number(ongkirDigits) || 0;
+  const perkiraanTotal = numericHargaBarang + numericOngkir;
+
+  const handleHargaBarangChange = (e) => {
+    const raw = e.target.value.replace(/\D/g, '');
+    setHargaBarangDigits(raw);
+    if (error) setError('');
+  };
+
+  const handleOngkirChange = (e) => {
+    const raw = e.target.value.replace(/\D/g, '');
+    setOngkirDigits(raw);
+    if (error) setError('');
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+
+    const cleanBarang = namaBarang.trim();
+    const cleanBeli = titikJemput.trim();
+    const cleanAntar = titikAntar.trim();
+
+    if (!cleanBarang || !cleanBeli || !cleanAntar) {
+      setError('Barang yang dititip, lokasi beli/ambil, dan tujuan wajib diisi.');
+      return;
+    }
+
+    if (!numericOngkir || numericOngkir < 2000) {
+      setError('Minimal tawaran upah driver adalah Rp 2.000.');
+      return;
+    }
+
+    let jadwalIso = null;
+    if (waktuBerangkat === 'jadwal') {
+      const picked = new Date(jadwalAt);
+      if (
+        !jadwalAt ||
+        Number.isNaN(picked.getTime()) ||
+        picked.getTime() < Date.now()
+      ) {
+        setError(
+          'Pilih tanggal dan jam yang valid (tidak di masa lalu).'
+        );
+        return;
+      }
+      jadwalIso = picked.toISOString();
+    }
+
+    setSubmitting(true);
+    try {
+      const payload = {
+        jenis_layanan: 'jastip',
+        nama_barang: cleanBarang,
+        titik_jemput: cleanBeli,
+        titik_antar: cleanAntar,
+        waktu_berangkat: waktuBerangkat,
+        jadwal_at: jadwalIso,
+        perkiraan_harga_barang: numericHargaBarang,
+        ongkir: numericOngkir,
+        catatan: catatan.trim(),
+      };
+
+      const res = await api.post('/orders', payload);
+      navigate('/customer/mencari', {
+        state: { order: res.data?.data },
+      });
+    } catch (err) {
+      setError(
+        err.response?.data?.message || 'Gagal membuat pesanan JasTip. Coba lagi.'
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <form
+      onSubmit={handleSubmit}
+      noValidate
+      className="pwa-shell"
+      style={{
+        minHeight: '844px',
+        boxSizing: 'border-box',
+        background: '#F5F6F8',
+        position: 'relative',
+        overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+        fontSize: '13px',
+        lineHeight: 1.4,
+        color: '#0F172A',
+      }}
+    >
+      {/* Header */}
+      <div
+        style={{
+          padding: '14px 20px 0',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          height: '52px',
+          flex: 'none',
+        }}
+      >
+        <Link
+          to="/customer"
+          aria-label="Kembali"
+          style={{
+            width: '44px',
+            height: '44px',
+            marginLeft: '-12px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: '#0F172A',
+          }}
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M15 5l-7 7 7 7" />
+          </svg>
+        </Link>
+        <div
+          style={{
+            fontWeight: 800,
+            fontSize: '17px',
+            letterSpacing: '-.01em',
+          }}
+        >
+          Titip barang (JasTip)
+        </div>
+      </div>
+
+      {/* Konten Utama */}
+      <div
+        style={{
+          flex: 1,
+          padding: '6px 20px 0',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '12px',
+          overflow: 'hidden',
+        }}
+      >
+        {/* Kartu Detail Titipan & Lokasi */}
+        <Card
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '12px',
+          }}
+        >
+          <Input
+            label="Barang yang dititip"
+            placeholder="Contoh: 2 porsi nasi goreng, tanpa pedas"
+            value={namaBarang}
+            onChange={(e) => {
+              setNamaBarang(e.target.value);
+              if (error) setError('');
+            }}
+          />
+
+          <Input
+            label="Beli / ambil di"
+            placeholder="Nama tempat atau alamat"
+            value={titikJemput}
+            onChange={(e) => {
+              setTitikJemput(e.target.value);
+              if (error) setError('');
+            }}
+          />
+
+          <Input
+            label="Antar ke"
+            placeholder="Antar ke mana? (contoh: Gedung Teknik Komputer)"
+            value={titikAntar}
+            onChange={(e) => {
+              setTitikAntar(e.target.value);
+              if (error) setError('');
+            }}
+          />
+
+          <div>
+            <div
+              style={{
+                fontSize: '11px',
+                fontWeight: 600,
+                color: '#475569',
+                marginBottom: '6px',
+              }}
+            >
+              Waktu
+            </div>
+            <div
+              style={{
+                display: 'flex',
+                background: '#F1F3F6',
+                borderRadius: '12px',
+                padding: '3px',
+                gap: '3px',
+              }}
+            >
+              <div
+                role="button"
+                tabIndex={0}
+                aria-pressed={waktuBerangkat === 'sekarang'}
+                onClick={() => setWaktuBerangkat('sekarang')}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setWaktuBerangkat('sekarang');
+                  }
+                }}
+                style={{
+                  flex: 1,
+                  height: '38px',
+                  borderRadius: '9px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontWeight: 700,
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                  background:
+                    waktuBerangkat === 'sekarang' ? '#fff' : 'transparent',
+                  color: waktuBerangkat === 'sekarang' ? '#8A4B04' : '#5B6678',
+                  boxShadow:
+                    waktuBerangkat === 'sekarang'
+                      ? '0 1px 3px rgba(15,23,42,.12)'
+                      : 'none',
+                }}
+              >
+                Sekarang
+              </div>
+
+              <div
+                role="button"
+                tabIndex={0}
+                aria-pressed={waktuBerangkat === 'jadwal'}
+                onClick={() => setWaktuBerangkat('jadwal')}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setWaktuBerangkat('jadwal');
+                  }
+                }}
+                style={{
+                  flex: 1,
+                  height: '38px',
+                  borderRadius: '9px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontWeight: 700,
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                  background:
+                    waktuBerangkat === 'jadwal' ? '#fff' : 'transparent',
+                  color: waktuBerangkat === 'jadwal' ? '#8A4B04' : '#5B6678',
+                  boxShadow:
+                    waktuBerangkat === 'jadwal'
+                      ? '0 1px 3px rgba(15,23,42,.12)'
+                      : 'none',
+                }}
+              >
+                Jadwalkan
+              </div>
+            </div>
+          </div>
+
+          {waktuBerangkat === 'jadwal' && (
+            <Input
+              label="Tanggal & jam"
+              type="datetime-local"
+              value={jadwalAt}
+              onChange={(e) => {
+                setJadwalAt(e.target.value);
+                if (error) setError('');
+              }}
+            />
+          )}
+        </Card>
+
+        {/* Kartu Harga Barang & Upah Driver */}
+        <Card
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '12px',
+          }}
+        >
+          <div style={{ display: 'flex', gap: '12px' }}>
+            <label style={{ flex: 1 }}>
+              <div
+                style={{
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  color: '#475569',
+                  marginBottom: '6px',
+                }}
+              >
+                Perkiraan harga barang
+              </div>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  height: '44px',
+                  borderRadius: '12px',
+                  background: '#F5F6F8',
+                  padding: '0 12px',
+                }}
+              >
+                <span style={{ color: '#5B6678', fontWeight: 700 }}>Rp</span>
+                <input
+                  aria-label="Perkiraan harga barang"
+                  value={formatRibuan(hargaBarangDigits)}
+                  onChange={handleHargaBarangChange}
+                  inputMode="numeric"
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    border: 0,
+                    outline: 0,
+                    background: 'transparent',
+                    font: "800 15px 'Plus Jakarta Sans',system-ui,sans-serif",
+                    color: '#0F172A',
+                  }}
+                />
+              </div>
+            </label>
+
+            <label style={{ flex: 1 }}>
+              <div
+                style={{
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  color: '#475569',
+                  marginBottom: '6px',
+                }}
+              >
+                Upah driver (tawaran)
+              </div>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  height: '44px',
+                  borderRadius: '12px',
+                  background: '#F5F6F8',
+                  padding: '0 12px',
+                }}
+              >
+                <span style={{ color: '#5B6678', fontWeight: 700 }}>Rp</span>
+                <input
+                  aria-label="Upah driver (tawaran)"
+                  value={formatRibuan(ongkirDigits)}
+                  onChange={handleOngkirChange}
+                  inputMode="numeric"
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    border: 0,
+                    outline: 0,
+                    background: 'transparent',
+                    font: "800 15px 'Plus Jakarta Sans',system-ui,sans-serif",
+                    color: '#0F172A',
+                  }}
+                />
+              </div>
+            </label>
+          </div>
+
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              background: '#FEF6E7',
+              borderRadius: '12px',
+              padding: '10px 12px',
+            }}
+          >
+            <span style={{ color: '#6B4308', fontWeight: 600 }}>
+              Perkiraan total
+            </span>
+            <span
+              style={{
+                fontWeight: 800,
+                fontSize: '15px',
+                color: '#4A2C03',
+              }}
+            >
+              Rp {formatRibuan(String(perkiraanTotal))}
+            </span>
+          </div>
+
+          <div style={{ color: '#5B6678', fontSize: '11.5px' }}>
+            Driver bisa menerima upahmu atau menawar balik sebelum membeli.
+          </div>
+        </Card>
+
+        {/* Kartu Catatan */}
+        <Card style={{ display: 'block' }}>
+          <Input
+            label="Catatan untuk driver (opsional)"
+            placeholder="Misal: tunggu di depan gerbang"
+            value={catatan}
+            onChange={(e) => setCatatan(e.target.value)}
+          />
+        </Card>
+
+        {error && (
+          <div
+            role="alert"
+            style={{
+              borderRadius: '12px',
+              background: '#FEF2F2',
+              padding: '8px 12px',
+              fontSize: '12px',
+              fontWeight: 600,
+              color: '#B91C1C',
+            }}
+          >
+            {error}
+          </div>
+        )}
+      </div>
+
+      {/* Tombol Bawah */}
+      <div style={{ padding: '12px 20px 20px', flex: 'none' }}>
+        <Button type="submit" variant="amber" disabled={submitting}>
+          {submitting ? 'Mencari driver...' : 'Cari driver'}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+========================================
+FILE: frontend\src\components\BottomNav.jsx
+========================================
+
+import { NavLink } from 'react-router-dom';
+
+const NAV_ITEMS = {
+  customer: [
+    {
+      label: 'Beranda',
+      to: '/customer',
+      end: true,
+      icon: (
+        <svg
+          width="22"
+          height="22"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.9"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z" />
+        </svg>
+      ),
+    },
+    {
+      label: 'Pesanan',
+      to: '/customer/pesanan',
+      icon: (
+        <svg
+          width="22"
+          height="22"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.9"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01" />
+        </svg>
+      ),
+    },
+    {
+      label: 'History',
+      to: '/customer/history',
+      icon: (
+        <svg
+          width="22"
+          height="22"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.9"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5l3 2" />
+        </svg>
+      ),
+    },
+    {
+      label: 'Profil',
+      to: '/customer/profil',
+      icon: (
+        <svg
+          width="22"
+          height="22"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.9"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="8" r="4" />
+          <path d="M4 21c0-4 4-6 8-6s8 2 8 6" />
+        </svg>
+      ),
+    },
+  ],
+  driver: [
+    {
+      label: 'Beranda',
+      to: '/driver',
+      end: true,
+      icon: (
+        <svg
+          width="22"
+          height="22"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.9"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z" />
+        </svg>
+      ),
+    },
+    {
+      label: 'Pesanan',
+      to: '/driver/pesanan',
+      icon: (
+        <svg
+          width="22"
+          height="22"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.9"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01" />
+        </svg>
+      ),
+    },
+    {
+      label: 'History',
+      to: '/driver/history',
+      icon: (
+        <svg
+          width="22"
+          height="22"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.9"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5l3 2" />
+        </svg>
+      ),
+    },
+    {
+      label: 'Profil',
+      to: '/driver/profil',
+      icon: (
+        <svg
+          width="22"
+          height="22"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.9"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="8" r="4" />
+          <path d="M4 21c0-4 4-6 8-6s8 2 8 6" />
+        </svg>
+      ),
+    },
+  ],
+};
+
+export default function BottomNav({ role = 'customer' }) {
+  const items = NAV_ITEMS[role] || NAV_ITEMS.customer;
+
+  return (
+    <nav
+      aria-label="Navigasi utama"
+      style={{
+        position: 'fixed',
+        left: '50%',
+        right: 'auto',
+        bottom: 0,
+        transform: 'translateX(-50%)',
+        width: '100%',
+        maxWidth: 'var(--screen-width)',
+        height: '68px',
+        background: '#fff',
+        boxShadow: '0 -1px 0 #E8EBEF',
+        display: 'flex',
+        padding: '0 8px calc(6px + env(safe-area-inset-bottom))',
+        marginTop: 0,
+        zIndex: 20,
+        flexShrink: 0,
+      }}
+    >
+      {items.map((item) => (
+        <NavLink
+          key={item.to}
+          to={item.to}
+          end={item.end}
+          style={({ isActive }) => ({
+            flex: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '3px',
+            fontSize: '10px',
+            fontWeight: 600,
+            color: isActive ? '#0F766E' : '#5B6678',
+            textDecoration: 'none',
+          })}
+        >
+          {item.icon}
+          <span>{item.label}</span>
+        </NavLink>
+      ))}
+    </nav>
+  );
+}
+
+========================================
+FILE: frontend\src\components\Button.jsx
+========================================
+
+import { Link } from 'react-router-dom';
+
+const BUTTON_VARIANTS = {
+  primary: {
+    background: '#0F766E',
+    color: '#fff',
+    boxShadow: 'none',
+  },
+  amber: {
+    background: '#F59E0B',
+    color: '#3B2402',
+    boxShadow: 'none',
+  },
+  outline: {
+    background: '#fff',
+    color: '#0F172A',
+    boxShadow: 'inset 0 0 0 1.5px #D5DAE1',
+  },
+  danger: {
+    background: '#B91C1C',
+    color: '#fff',
+    boxShadow: 'none',
+  },
+  dangerOutline: {
+    background: '#fff',
+    color: '#B91C1C',
+    boxShadow: 'inset 0 0 0 1.5px #F3C4C4',
+  },
+  disabled: {
+    background: '#E8EAEE',
+    color: '#64748B',
+    boxShadow: 'none',
+  },
+};
+
+export default function Button({
+  children,
+  to,
+  variant = 'primary',
+  height = 48,
+  disabled = false,
+  type = 'button',
+  style,
+  className = '',
+  ...props
+}) {
+  const activeVariant = disabled ? 'disabled' : variant;
+  const variantStyle = BUTTON_VARIANTS[activeVariant] || BUTTON_VARIANTS.primary;
+
+  const baseStyle = {
+    height: `${height}px`,
+    borderRadius: '14px',
+    border: 0,
+    font: "700 14px 'Plus Jakarta Sans',system-ui,sans-serif",
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '8px',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    width: '100%',
+    textDecoration: 'none',
+    boxSizing: 'border-box',
+    ...variantStyle,
+    ...style,
+  };
+
+  if (to && !disabled) {
+    return (
+      <Link to={to} className={className} style={baseStyle} {...props}>
+        {children}
+      </Link>
+    );
+  }
+
+  return (
+    <button
+      type={type}
+      disabled={disabled}
+      className={className}
+      style={baseStyle}
+      {...props}
+    >
+      {children}
+    </button>
+  );
+}
+
+
+
+========================================
+FILE: frontend\src\components\Card.jsx
+========================================
+
+import { Link } from 'react-router-dom';
+
+const VARIANT_STYLES = {
+  default: {
+    background: '#fff',
+    borderRadius: '18px',
+    padding: '14px',
+    boxShadow: '0 1px 2px rgba(15,23,42,.05),0 0 0 1px rgba(15,23,42,.04)',
+  },
+  soft: {
+    background: '#F0F7F6',
+    borderRadius: '18px',
+    padding: '14px',
+    boxShadow: 'none',
+  },
+  danger: {
+    background: '#FFF6F6',
+    borderRadius: '18px',
+    padding: '14px',
+    boxShadow: '0 0 0 1.5px #F3C4C4',
+  },
+};
+
+export default function Card({
+  children,
+  to,
+  variant = 'default',
+  style,
+  className = '',
+  ...props
+}) {
+  const mergedStyle = {
+    ...VARIANT_STYLES[variant],
+    ...style,
+  };
+
+  if (to) {
+    return (
+      <Link
+        to={to}
+        className={className}
+        style={{
+          textDecoration: 'none',
+          color: 'inherit',
+          ...mergedStyle,
+        }}
+        {...props}
+      >
+        {children}
+      </Link>
+    );
+  }
+
+  return (
+    <div className={className} style={mergedStyle} {...props}>
+      {children}
+    </div>
+  );
+}
+
+
+
+========================================
+FILE: frontend\src\components\Chip.jsx
+========================================
+
+const CHIP_VARIANTS = {
+  teal: {
+    background: '#E6F4F2',
+    color: '#0B5F59',
+  },
+  success: {
+    background: '#DDF3E4',
+    color: '#14532D',
+  },
+  warning: {
+    background: '#FDE9B8',
+    color: '#6B4308',
+  },
+  danger: {
+    background: '#FDECEC',
+    color: '#991B1B',
+  },
+  off: {
+    background: '#E8EAEE',
+    color: '#475569',
+  },
+  neutral: {
+    background: '#F1F3F6',
+    color: '#475569',
+  },
+};
+
+export default function Chip({
+  children,
+  variant = 'teal',
+  style,
+  className = '',
+  ...props
+}) {
+  const variantStyle = CHIP_VARIANTS[variant] || CHIP_VARIANTS.teal;
+
+  return (
+    <span
+      className={className}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '4px',
+        height: '24px',
+        padding: '0 9px',
+        borderRadius: '99px',
+        fontSize: '11px',
+        fontWeight: 700,
+        ...variantStyle,
+        ...style,
+      }}
+      {...props}
+    >
+      {children}
+    </span>
+  );
+}
+
+
+
+========================================
+FILE: frontend\src\components\Input.jsx
+========================================
+
+const INPUT_VARIANTS = {
+  filled: {
+    height: '44px',
+    background: '#F5F6F8',
+    padding: '0 12px',
+    font: "600 13px 'Plus Jakarta Sans',system-ui,sans-serif",
+    boxShadow: 'none',
+  },
+  bordered: {
+    height: '46px',
+    background: '#fff',
+    padding: '0 14px',
+    font: "500 13px 'Plus Jakarta Sans',system-ui,sans-serif",
+    boxShadow: 'inset 0 0 0 1.5px #E2E6EB',
+  },
+};
+
+export default function Input({
+  label,
+  hideLabel = false,
+  variant = 'filled',
+  containerStyle,
+  labelStyle,
+  style,
+  ...props
+}) {
+  const variantStyle = INPUT_VARIANTS[variant] || INPUT_VARIANTS.filled;
+
+  const inputElement = (
+    <input
+      style={{
+        width: '100%',
+        boxSizing: 'border-box',
+        border: 0,
+        outline: 0,
+        borderRadius: '12px',
+        color: '#0F172A',
+        ...variantStyle,
+        ...style,
+      }}
+      {...props}
+    />
+  );
+
+  if (!label) {
+    return inputElement;
+  }
+
+  return (
+    <label style={{ display: 'block', ...containerStyle }}>
+      <span
+        style={{
+          display: hideLabel ? 'none' : 'block',
+          fontSize: '11px',
+          fontWeight: 600,
+          color: '#475569',
+          marginBottom: '6px',
+          ...labelStyle,
+        }}
+      >
+        {label}
+      </span>
+      {inputElement}
+    </label>
+  );
+}
+
+
+
+========================================
+FILE: frontend\src\components\Navbar.jsx
+========================================
+
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
+import { LogOut, Bike, User, MapPin } from 'lucide-react';
+
+export default function Navbar() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  const handleLogout = () => {
+    logout();
+    navigate('/login');
+  };
+
+  if (!user) return null;
+
+  const isDriver = user.role === 'driver';
+
+  return (
+    <header className="sticky top-0 z-20 bg-[#0B4F4A] px-5 py-4 text-white">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[12px] bg-white">
+            <MapPin className="h-[19px] w-[19px] text-[#0F766E]" strokeWidth={2.25} />
+          </div>
+
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-[16px] font-extrabold leading-[1.2] tracking-[-0.02em] text-white">
+                AnjemDips
+              </span>
+              <span
+                className={`inline-flex items-center gap-1 rounded-[99px] px-2 py-0.5 text-[10px] font-bold tracking-[0.02em] ${
+                  isDriver
+                    ? 'bg-[#DDF3E4] text-[#14532D]'
+                    : 'bg-[#FBBF24] text-[#0F172A]'
+                }`}
+              >
+                {isDriver ? (
+                  <>
+                    <Bike className="h-3 w-3" strokeWidth={2.25} />
+                    <span>Driver</span>
+                  </>
+                ) : (
+                  <>
+                    <User className="h-3 w-3" strokeWidth={2.25} />
+                    <span>Pemesan</span>
+                  </>
+                )}
+              </span>
+            </div>
+            <p className="mt-0.5 truncate text-[12px] font-medium text-[#B7E3DE]">
+              Halo, {user.nama}
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleLogout}
+          title="Keluar Akun"
+          className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-[12px] bg-white/12 px-3 py-2 text-[12px] font-semibold text-white transition hover:bg-white/20 active:scale-95"
+        >
+          <LogOut className="h-3.5 w-3.5" strokeWidth={2.2} />
+          <span>Keluar</span>
+        </button>
+      </div>
+    </header>
+  );
+}
+
+
+
+========================================
+FILE: frontend\src\components\ProtectedRoute.jsx
+========================================
+
+import { Navigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
+
+export default function ProtectedRoute({ children, allowedRole }) {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-100">
+        <div className="text-sm font-medium text-slate-500 animate-pulse">
+          Memuat sesi AnjemDips...
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  if (allowedRole && user.role !== allowedRole) {
+    return <Navigate to={user.role === 'driver' ? '/driver' : '/customer'} replace />;
+  }
+
+  return children;
+}
+
+
+
+========================================
+FILE: frontend\src\components\Tile.jsx
+========================================
+
+import { Link } from 'react-router-dom';
+
+const TILE_VARIANTS = {
+  teal: {
+    background: '#0F766E',
+    color: '#fff',
+    iconBg: 'rgba(255,255,255,.16)',
+    subtitleColor: '#C9ECE8',
+  },
+  amber: {
+    background: '#FDE9B8',
+    color: '#4A2C03',
+    iconBg: 'rgba(74,44,3,.1)',
+    subtitleColor: '#6B4308',
+  },
+};
+
+export default function Tile({
+  to,
+  variant = 'teal',
+  icon,
+  title,
+  subtitle,
+  style,
+  className = '',
+  ...props
+}) {
+  const theme = TILE_VARIANTS[variant] || TILE_VARIANTS.teal;
+
+  return (
+    <Link
+      to={to}
+      className={className}
+      style={{
+        flex: 1,
+        borderRadius: '20px',
+        padding: '16px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '14px',
+        textDecoration: 'none',
+        boxSizing: 'border-box',
+        height: '150px',
+        background: theme.background,
+        color: theme.color,
+        ...style,
+      }}
+      {...props}
+    >
+      <div
+        style={{
+          width: '40px',
+          height: '40px',
+          borderRadius: '13px',
+          background: theme.iconBg,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        {icon}
+      </div>
+      <div style={{ marginTop: 'auto' }}>
+        <div style={{ fontWeight: 800, fontSize: '16px' }}>{title}</div>
+        <div style={{ fontSize: '12px', color: theme.subtitleColor }}>
+          {subtitle}
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+

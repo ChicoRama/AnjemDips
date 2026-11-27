@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { LogOut, Bike, User, MapPin } from 'lucide-react';
+import NotificationCenter from './NotificationCenter';
 
 export default function Navbar() {
   const { user, logout } = useAuth();
@@ -54,17 +55,19 @@ export default function Navbar() {
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={handleLogout}
-          title="Keluar Akun"
-          className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-[12px] bg-white/12 px-3 py-2 text-[12px] font-semibold text-white transition hover:bg-white/20 active:scale-95"
-        >
-          <LogOut className="h-3.5 w-3.5" strokeWidth={2.2} />
-          <span>Keluar</span>
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <NotificationCenter />
+          <button
+            type="button"
+            onClick={handleLogout}
+            title="Keluar Akun"
+            className="inline-flex cursor-pointer items-center gap-1.5 rounded-[12px] bg-white/12 px-3 py-2 text-[12px] font-semibold text-white transition hover:bg-white/20 active:scale-95"
+          >
+            <LogOut className="h-3.5 w-3.5" strokeWidth={2.2} />
+            <span>Keluar</span>
+          </button>
+        </div>
       </div>
     </header>
   );
 }
-
